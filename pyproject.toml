@@ -1,0 +1,59 @@
+[project]
+name = "picard-work-hierarchy"
+version = "0.1.0"
+description = "MusicBrainz Picard 2 plugin that tags classical works with their full work hierarchy, including tracks that contain several movements"
+readme = "README.md"
+authors = [{ name = "John Hamilton", email = "jlhamilton@gmail.com" }]
+license = "GPL-2.0-or-later"
+# This is the development environment. The plugin itself runs inside Picard's
+# own interpreter (Python 3.7+ for Picard 2.9+), so the code in
+# src/work_hierarchy is kept compatible with that; see the ruff and ty
+# target versions below.
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = ["picard==2.13.3", "pytest>=9.1.1", "ruff>=0.17.1", "ty>=0.0.89"]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "work_hierarchy"
+
+[tool.uv]
+preview = true
+
+[tool.ruff]
+target-version = "py37"
+line-length = 100
+per-file-target-version = { "scripts/**" = "py314", "tests/**" = "py314" }
+
+[tool.ruff.format]
+preview = true
+
+[tool.ruff.lint]
+preview = true
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# Dashes are matched deliberately as separators in work titles.
+allowed-confusables = ["–"]
+
+[tool.ruff.lint.per-file-ignores]
+# Picard reads a plugin's PLUGIN_* metadata from its package's __init__.py and
+# expects it to register itself when imported. Picard's OptionsPage declares
+# its settings in a mutable class attribute.
+"src/work_hierarchy/__init__.py" = ["non-empty-init-module", "mutable-class-default"]
+
+[tool.ty.environment]
+python-version = "3.8"
+
+[[tool.ty.overrides]]
+# Picard and PyQt5 only exist inside Picard itself.
+include = ["src/work_hierarchy/__init__.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
