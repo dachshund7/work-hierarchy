@@ -76,7 +76,7 @@ OPTIONAL_KEYS = {
 
 
 def trim(node):
-    """Drop optional keys and every relationship that is not to a work."""
+    """Drop optional keys and every relationship but to works and composers."""
     if isinstance(node, list):
         return [trim(item) for item in node]
     if not isinstance(node, dict):
@@ -84,7 +84,9 @@ def trim(node):
     trimmed = {key: trim(value) for key, value in node.items() if key not in OPTIONAL_KEYS}
     if "relations" in trimmed:
         trimmed["relations"] = [
-            rel for rel in trimmed["relations"] if rel.get("target-type") == "work"
+            rel
+            for rel in trimmed["relations"]
+            if rel.get("target-type") == "work" or rel.get("type") == "composer"
         ]
     return trimmed
 
@@ -114,7 +116,7 @@ def main() -> None:
         while pending:
             work_id = pending.pop()
             done.add(work_id)
-            work = trim(get(f"work/{work_id}", ["work-rels"]))
+            work = trim(get(f"work/{work_id}", ["work-rels", "artist-rels"]))
             save(works_dir / f"{work_id}.json", work)
             print(f"  work {work['title']}")
             parent = WorkInfo.from_json(work).parent()

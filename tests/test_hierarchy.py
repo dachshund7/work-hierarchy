@@ -18,6 +18,7 @@ from work_hierarchy.hierarchy import (
     performances,
     resolve,
     standard_tags,
+    title_tags,
     to_json,
 )
 
@@ -374,6 +375,9 @@ def test_json_format():
         "part_total": 3,
         "part_attributes": [],
         "collections": [],
+        "composers": [
+            {"id": "b972f589-fb0e-474e-b64a-803b0364fa75", "name": "Wolfgang Amadeus Mozart"}
+        ],
     }
     assert (act["name"], act["position"], act["part_total"]) == ("Akt I", 2, 31)
     assert act["part_attributes"] == ["act"]
@@ -390,3 +394,112 @@ def test_json_includes_collections():
             "position": 1,
         }
     ]
+
+
+def test_json_includes_composers():
+    segments = resolve(performances(recording("bach_keyboard_suites", 1, 4)), ALL_WORKS).segments
+    bach = [{"id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach"}]
+    for segment in json.loads(to_json(segments))["segments"]:
+        # The performed movements come from the release, the suite from its lookup
+        assert [node["composers"] for node in segment["path"]] == [bach, bach]
+
+
+def test_composers_are_unknown_for_works_not_looked_up():
+    segments = resolve(performances(recording("zauberfloete", 1, 2)), {}).segments
+    # The path stops at the act, which is known only from the number's
+    # relationship to it
+    act, number = json.loads(to_json(segments))["segments"][0]["path"]
+    assert act["composers"] is None
+    assert number["composers"] == [
+        {"id": "b972f589-fb0e-474e-b64a-803b0364fa75", "name": "Wolfgang Amadeus Mozart"}
+    ]
+
+
+def test_composers_are_read_once_each():
+    node = {
+        "id": "w",
+        "title": "Trio",
+        "relations": [
+            {"target-type": "artist", "type": "composer", "artist": {"id": "a", "name": "A"}},
+            {"target-type": "artist", "type": "composer", "artist": {"id": "a", "name": "A"}},
+            {"target-type": "artist", "type": "lyricist", "artist": {"id": "b", "name": "B"}},
+        ],
+    }
+    assert [c.id for c in WorkInfo.from_json(node).composers] == ["a"]
+
+
+# Work and movement from titles
+
+
+def test_unlinked_movement_is_read_from_its_title():
+    prelude = work("p", "Suite for Cello Solo no. 1 in G major, BWV 1007: I. Prélude")
+    metadata = FakeMetadata()
+    segments = resolve(performed(prelude), {}).segments
+
+    apply_tags(metadata, segments)
+
+    assert metadata["work"] == ["Suite for Cello Solo no. 1 in G major, BWV 1007"]
+    assert metadata["movement"] == "Prélude"
+    assert metadata["movementnumber"] == "1"
+    assert metadata["showmovement"] == "1"
+    assert "movementtotal" in metadata.deleted
+    # The JSON still says only what MusicBrainz links
+    [segment] = json.loads(metadata[JSON_TAG])["segments"]
+    assert [node["title"] for node in segment["path"]] == [prelude.title]
+
+
+def test_recording_title_is_read_without_works():
+    tags = title_tags((), "Introit: Gaudeamus omnes: II. Gloria")
+    assert tags is not None
+    assert (tags.work, tags.movement, tags.movementnumber, tags.movementtotal) == (
+        ("Introit: Gaudeamus omnes",),
+        "Gloria",
+        2,
+        None,
+    )
+
+
+def test_unlinked_movements_of_the_same_work_are_joined():
+    segments = resolve(
+        performed(work("a", "Suite: V. Passepied I"), work("b", "Suite: VI. Passepied II")), {}
+    ).segments
+    tags = title_tags(segments, None)
+    assert tags is not None
+    assert (tags.work, tags.movement, tags.movementnumber) == (
+        ("Suite",),
+        "Passepied I / Passepied II",
+        5,
+    )
+    # Not if they are movements of different works
+    segments = resolve(performed(work("a", "Suite: V. Air"), work("b", "Partita: I. Air")), {})
+    assert title_tags(segments.segments, None) is None
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Erlkönig, D. 328",
+        "Slavonic Dances, op. 72: No. 1 in B major",
+        "Mass in B minor: Kyrie",
+        "Suite: IIII. Gigue",
+    ],
+)
+def test_titles_that_are_not_movements(title):
+    assert title_tags(resolve(performed(work("w", title)), {}).segments, None) is None
+    assert title_tags((), title) is None
+
+
+def test_titles_are_not_read_when_musicbrainz_links_the_parent():
+    suite = work("s", "Suite", parts=[link("p", "Suite: I. Prélude", 1)])
+    prelude = work("p", "Suite: I. Prélude", parents=[link("s", "Suite")])
+    segments = resolve(performed(prelude), {"s": suite}).segments
+    assert title_tags(segments, None) is None
+
+
+def test_titles_are_not_read_for_works_in_a_collection():
+    waltz = work(
+        "w",
+        "Waltzes, op. 54: I. Moderato",
+        parents=[link("c", "Waltzes", 1, ["part of collection"])],
+    )
+    assert title_tags(resolve(performed(waltz), {}).segments, None) is None

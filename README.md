@@ -78,8 +78,16 @@ The rules:
   followed. The partita stays the work; the collection is recorded in the JSON.
 - A recording of a work without parts (a song, say) gets `work` and no
   movement tags.
-- If the recording has no work relationships, the movement tags and
-  `work_hierarchy` are deleted so stale values don't linger in files.
+- Many movements on MusicBrainz aren't linked to their work, but are titled
+  like one of its parts ("Suite for Cello Solo no. 1 in G major, BWV 1007: I.
+  Prélude"), and many recordings aren't linked to works at all. When the
+  performed works have no parent and aren't in a collection, or there are
+  none, their titles, or the recording's, are read as "<Work>: <Roman
+  numeral>. <Movement>", as the Work & Movement plugin does, for `work`,
+  `movement` and `movementnumber`. `work_hierarchy` still only describes
+  what MusicBrainz links.
+- Otherwise, if the recording has no work relationships, the movement tags
+  and `work_hierarchy` are deleted so stale values don't linger in files.
 - `musicbrainz_workid` is left as Picard sets it: the IDs of the works the
   recording performs. Picard's original `work` and `musicbrainz_workid` values
   are kept in the `_recording_work` and `_recording_workid` script variables,
@@ -106,7 +114,10 @@ A JSON object. Track 4 above:
           "position": null,
           "part_total": 11,
           "part_attributes": [],
-          "collections": []
+          "collections": [],
+          "composers": [
+            { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
+          ]
         },
         {
           "id": "87f88e03-4f1d-3230-a37f-c12d23d8b091",
@@ -116,7 +127,10 @@ A JSON object. Track 4 above:
           "position": 5,
           "part_total": 0,
           "part_attributes": [],
-          "collections": []
+          "collections": [],
+          "composers": [
+            { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
+          ]
         }
       ],
       "attributes": []
@@ -132,7 +146,10 @@ A JSON object. Track 4 above:
           "position": 6,
           "part_total": 0,
           "part_attributes": [],
-          "collections": []
+          "collections": [],
+          "composers": [
+            { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
+          ]
         }
       ],
       "attributes": []
@@ -165,6 +182,12 @@ A JSON object. Track 4 above:
     `act`, `movement` or `number`, when MusicBrainz has them.
   - `collections`: collections this work is part of, each with `id`, `title`
     and `position`.
+  - `composers`: the work's composers as linked on MusicBrainz, each with
+    `id` (MusicBrainz artist ID) and `name`; `null` if the work's own data
+    couldn't be looked up. Picard's `composer` tag names only the composers
+    of the performed works, possibly as credited or translated, while these
+    are their MusicBrainz names. Compare `id` with `musicbrainz_artistid` to
+    tell whether the track artist is the composer.
 
 ### Grouping
 
@@ -181,8 +204,8 @@ A JSON object. Track 4 above:
 
 When Picard loads an album, the release data already includes, for each
 recording, the works it performs and each work's immediate parent. The plugin
-looks up each parent with `/ws/2/work/<id>?inc=work-rels` to find the next
-level up and how many parts it has, and repeats until it reaches a top-level
+looks up each parent with `/ws/2/work/<id>?inc=work-rels+artist-rels` to find
+the next level up, how many parts it has and who composed it, and repeats until it reaches a top-level
 work. Lookups are shared between tracks (twenty tracks of three suites cost
 three requests) and cached for 10 minutes. Picard waits for them before
 finishing the album. If a lookup fails, the affected tracks are tagged with

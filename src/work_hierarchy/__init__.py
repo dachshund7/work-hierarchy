@@ -82,7 +82,7 @@ class WorkStore:
             "work",
             work_id,
             partial(self._received, work_id),
-            inc=["work-rels"],
+            inc=["work-rels", "artist-rels"],
             priority=True,
             important=False,
         )
@@ -122,10 +122,11 @@ class TrackJob:
     before running scripts and finishing the album.
     """
 
-    def __init__(self, album, metadata, performed, work_level, store):
+    def __init__(self, album, metadata, performed, work_level, store, recording_title=None):
         self.album = album
         self.metadata = metadata
         self.performed = performed
+        self.recording_title = recording_title
         self.work_level = work_level
         self.store = store
         self.segments = ()
@@ -139,7 +140,7 @@ class TrackJob:
         try:
             resolution = resolve(self.performed, self.store.works(), self.failed)
             self.segments = resolution.segments
-            apply_tags(self.metadata, self.segments, self.work_level)
+            apply_tags(self.metadata, self.segments, self.work_level, self.recording_title)
             if not resolution.unknown:
                 self._finish()
                 return
@@ -182,7 +183,9 @@ class TrackJob:
         """
         for track in self.album.tracks:
             if track.metadata is self.metadata:
-                apply_tags(track.orig_metadata, self.segments, self.work_level)
+                apply_tags(
+                    track.orig_metadata, self.segments, self.work_level, self.recording_title
+                )
                 break
         # For the standalone recordings "album" this updates the tracks' files.
         self.album._finalize_loading(None)
@@ -197,7 +200,9 @@ def process_track(album, metadata, track_node, release_node=None):
     metadata["~recording_work"] = metadata.getall("work")
     metadata["~recording_workid"] = metadata.getall("musicbrainz_workid")
     work_level = get_config().setting[SETTING_WORK_LEVEL]
-    TrackJob(album, metadata, performances(recording), work_level, _store).run()
+    TrackJob(
+        album, metadata, performances(recording), work_level, _store, recording.get("title")
+    ).run()
 
 
 class WorkHierarchyOptionsPage(OptionsPage):

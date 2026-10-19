@@ -6,9 +6,10 @@ works on the JSON documents returned by the MusicBrainz web service:
 * the recording node of a release lookup made with ``work-rels`` and
   ``work-level-rels`` (what Picard requests when "Use track relationships" is
   enabled), which contains the works the recording is a performance of, plus
-  each work's own work relationships (so its immediate parent is known);
-* work lookups made with ``inc=work-rels``, used to climb from a parent to its
-  own parent, and so on up to the top-level work.
+  each work's own work relationships (so its immediate parent is known) and,
+  as ``artist-rels`` is requested too, its composers;
+* work lookups made with ``inc=work-rels+artist-rels``, used to climb from a
+  parent to its own parent, and so on up to the top-level work.
 
 MusicBrainz does not record where in a recording each work starts, so nothing
 here deals with timing: a track is described by the ordered list of works it
@@ -54,6 +55,8 @@ MAX_DEPTH = 12
 _WORD_RE = re.compile(r"\w+")
 _SEPARATORS = ":.,;/|-–—"
 _LEADING_SEPARATORS_RE = re.compile(r"^[\s:.,;/|\-–—]+")
+#: A movement title in MusicBrainz style, "<Work>: <Roman numeral>. <Movement>".
+_TITLE_MOVEMENT_RE = re.compile(r"^(?P<work>.+):\s+(?P<num>[IVXLCDM]+)\.\s+(?P<movement>\S.*)$")
 _NUMERAL_RE = re.compile(r"^(?P<num>[IVXLCDM]+|\d+)\.\s+(?=\S)")
 _ROMAN_RE = re.compile(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$")
 _ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
@@ -76,20 +79,34 @@ class WorkLink:
 
 
 @dataclass(frozen=True)
+class Artist:
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class WorkInfo:
-    """A work and its "parts" relationships."""
+    """A work, its "parts" relationships and its composers."""
 
     id: str
     title: str
     type: str | None
     parents: tuple[WorkLink, ...]
     parts: tuple[WorkLink, ...]
+    composers: tuple[Artist, ...] = ()
 
     @classmethod
     def from_json(cls, node: Mapping[str, Any]) -> WorkInfo:
         parents = []
         parts = []
+        composers = []
         for rel in node.get("relations") or ():
+            if rel.get("target-type") == "artist" and rel.get("type") == "composer":
+                artist = rel.get("artist") or {}
+                composer = Artist(artist.get("id") or "", artist.get("name") or "")
+                if composer.id and composer not in composers:
+                    composers.append(composer)
+                continue
             if rel.get("target-type") != "work" or rel.get("type") != "parts":
                 continue
             target = rel.get("work") or {}
@@ -112,6 +129,7 @@ class WorkInfo:
             type=node.get("type"),
             parents=tuple(parents),
             parts=tuple(parts),
+            composers=tuple(composers),
         )
 
     @property
@@ -176,6 +194,8 @@ class Node:
     #: Attributes of the relationship to the parent, e.g. "act" or "movement".
     part_attributes: tuple[str, ...]
     collections: tuple[WorkLink, ...]
+    #: None when the work was not looked up, like part_total.
+    composers: tuple[Artist, ...] | None
     #: Part number to display: the position, or a number parsed from the title.
     number: int | None
 
@@ -192,6 +212,9 @@ class Node:
                 {"id": link.id, "title": link.title, "position": link.position}
                 for link in self.collections
             ],
+            "composers": None
+            if self.composers is None
+            else [{"id": artist.id, "name": artist.name} for artist in self.composers],
         }
 
 
@@ -323,6 +346,49 @@ def standard_tags(segments: Sequence[Segment], work_level: str = WORK_LEVEL_TOP)
     )
 
 
+def title_tags(segments: Sequence[Segment], recording_title: str | None) -> StandardTags | None:
+    """Work and movement tags read from titles, when MusicBrainz doesn't link them.
+
+    Many movements are linked to a work of their own, titled "Suite no. 1 in
+    G major, BWV 1007: I. Prélude", that isn't a part of the suite, and
+    many recordings aren't linked to works at all. If the performed works
+    have no parent and aren't in a collection, or if there are none, their
+    titles, or the recording's, are read as "<Work>: <Roman numeral>.
+    <Movement>", the way the Work & Movement plugin does. Returns None if the
+    titles don't all name movements of the same work.
+    """
+    if segments:
+        if any(len(segment.path) > 1 or segment.work.collections for segment in segments):
+            return None
+        titles = [segment.work.title for segment in segments]
+    elif recording_title:
+        titles = [recording_title]
+    else:
+        return None
+
+    movements: list[str] = []
+    works = set()
+    number = None
+    for title in titles:
+        match = _TITLE_MOVEMENT_RE.match(title)
+        value = _numeral_value(match.group("num")) if match else None
+        if match is None or value is None:
+            return None
+        works.add(match.group("work"))
+        if number is None:
+            number = value
+        if match.group("movement") not in movements:
+            movements.append(match.group("movement"))
+    if len(works) != 1:
+        return None
+    return StandardTags(
+        work=(works.pop(),),
+        movement=" / ".join(movements),
+        movementnumber=number,
+        movementtotal=None,
+    )
+
+
 def to_json(segments: Sequence[Segment]) -> str:
     document = {
         "version": FORMAT_VERSION,
@@ -335,18 +401,29 @@ def apply_tags(
     metadata: MetadataLike,
     segments: Sequence[Segment],
     work_level: str = WORK_LEVEL_TOP,
+    recording_title: str | None = None,
 ) -> None:
     """Write the work, movement and work_hierarchy tags.
 
     Tags that do not apply are deleted so stale values are removed from files.
+    The work_hierarchy tag only describes what MusicBrainz links, so the
+    tags read from titles (see title_tags) only go in the standard tags.
     """
+    from_titles = title_tags(segments, recording_title)
     if not segments:
         metadata.delete(JSON_TAG)
-        for name in MOVEMENT_TAGS:
-            metadata.delete(name)
+        if from_titles is None:
+            for name in MOVEMENT_TAGS:
+                metadata.delete(name)
+        else:
+            _write_standard_tags(metadata, from_titles)
         return
 
-    tags = standard_tags(segments, work_level)
+    _write_standard_tags(metadata, from_titles or standard_tags(segments, work_level))
+    metadata[JSON_TAG] = to_json(segments)
+
+
+def _write_standard_tags(metadata: MetadataLike, tags: StandardTags) -> None:
     metadata["work"] = list(tags.work)
     values = {
         "movement": tags.movement,
@@ -359,7 +436,6 @@ def apply_tags(
             metadata.delete(name)
         else:
             metadata[name] = str(value)
-    metadata[JSON_TAG] = to_json(segments)
 
 
 def display_name(
@@ -430,6 +506,7 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
             part_total=info.part_total if info else None,
             part_attributes=parent_link.attributes if parent_link else (),
             collections=info.collections if info else (),
+            composers=info.composers if info else None,
             number=position if position is not None else numeral,
         )
         nodes.append(node)

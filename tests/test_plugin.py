@@ -47,7 +47,7 @@ def test_one_lookup_per_parent_work(picard_env):
         "ddd67114-e7d5-4b79-bffc-38d6e9ea4ca9",
         "eb3a7cf5-a796-4d88-acd3-beac6f43b657",
     ])
-    assert all(call["inc"] == ["work-rels"] for call in tagger.mb_api.calls)
+    assert all(call["inc"] == ["work-rels", "artist-rels"] for call in tagger.mb_api.calls)
 
 
 def test_track_with_two_movements(picard_env):
@@ -198,13 +198,33 @@ def test_without_track_relationships_tags_are_left_alone(picard_env):
 def test_recording_without_works_clears_stale_tags(picard_env):
     tagger, _ = picard_env
     release = load_fixture("bach_keyboard_suites")
-    release["media"][0]["tracks"][3]["recording"]["relations"] = []
+    recording = release["media"][0]["tracks"][3]["recording"]
+    recording["relations"] = []
+    recording["title"] = "Passepied I/II"
     album = start_album_load(release)
     tagger.mb_api.serve()
 
     t = track(album, 1, 4)
     assert "work_hierarchy" in t.metadata.deleted_tags
     assert "movement" in t.metadata.deleted_tags
+
+
+def test_recording_without_works_is_tagged_from_its_title(picard_env):
+    tagger, _ = picard_env
+    release = load_fixture("bach_keyboard_suites")
+    release["media"][0]["tracks"][3]["recording"]["relations"] = []
+    album = start_album_load(release)
+    tagger.mb_api.serve()
+
+    t = track(album, 1, 4)
+    assert tags(t, "work", "movement", "movementnumber", "showmovement") == {
+        "work": ["French Overture in B-minor, BWV 831"],
+        "movement": ["Passepied I/II"],
+        "movementnumber": ["4"],
+        "showmovement": ["1"],
+    }
+    assert "movementtotal" in t.metadata.deleted_tags
+    assert "work_hierarchy" in t.metadata.deleted_tags
 
 
 def test_standalone_recording(picard_env):
