@@ -3,18 +3,21 @@
 import json
 
 import pytest
-from conftest import WORKS, load_fixture, load_work
+from support import WORKS, load_fixture, load_work
 
-from work_hierarchy.hierarchy import (
+from hierarchy import (
     JSON_TAG,
     MAX_DEPTH,
     WORK_LEVEL_PARENT,
+    Artist,
     Performance,
     WorkInfo,
     WorkLink,
     _numeral_value,
+    apply_composer_tags,
     apply_tags,
     display_name,
+    inherited_composers,
     performances,
     resolve,
     standard_tags,
@@ -30,8 +33,8 @@ def recording(release: str, disc: int, number: int) -> dict:
     return medium["tracks"][number - 1]["recording"]
 
 
-def work(work_id, title, parents=(), parts=(), type=None):
-    return WorkInfo(work_id, title, type, tuple(parents), tuple(parts))
+def work(work_id, title, parents=(), parts=(), type=None, composers=()):
+    return WorkInfo(work_id, title, type, tuple(parents), tuple(parts), tuple(composers))
 
 
 def link(work_id, title, position=None, attributes=()):
@@ -50,6 +53,9 @@ class FakeMetadata(dict):
     def __setitem__(self, name, values):
         self.deleted.discard(name)
         super().__setitem__(name, values)
+
+    def getall(self, name):
+        return list(self.get(name, []))
 
     def delete(self, name):
         self.pop(name, None)
@@ -426,6 +432,113 @@ def test_composers_are_read_once_each():
         ],
     }
     assert [c.id for c in WorkInfo.from_json(node).composers] == ["a"]
+
+
+# Composers inherited from parent works
+
+MOZART = Artist("b972f589-fb0e-474e-b64a-803b0364fa75", "Wolfgang Amadeus Mozart")
+SCHIKANEDER = Artist("s", "Emanuel Schikaneder", "Schikaneder, Emanuel")
+
+
+def without_composers(node: dict) -> dict:
+    for rel in node["relations"]:
+        if rel.get("type") == "performance":
+            work = rel["work"]
+            work["relations"] = [r for r in work["relations"] if r.get("type") != "composer"]
+    return node
+
+
+def test_work_without_composers_inherits_its_parents():
+    number = recording("zauberfloete", 1, 2)
+    segments = resolve(performances(without_composers(number)), ALL_WORKS).segments
+
+    [mozart] = inherited_composers(segments)
+    assert mozart == MOZART
+    # The sort name comes from the act's lookup.
+    assert mozart.sort_name == "Mozart, Wolfgang Amadeus"
+
+
+def test_works_with_composers_inherit_nothing():
+    segments = resolve(performances(recording("zauberfloete", 1, 2)), ALL_WORKS).segments
+    assert inherited_composers(segments) == ()
+
+
+def test_nearest_ancestor_with_composers_wins():
+    top = work("t", "Opera", composers=[MOZART])
+    act = work("a", "Opera: Act I", parents=[link("t", "Opera")], composers=[SCHIKANEDER])
+    scene = work("s1", "Opera: Act I: Scene 1", parents=[link("a", "Opera: Act I")])
+    number = work("n", "Opera: Act I: Scene 1: No. 1", parents=[link("s1", "Scene 1", 1)])
+    works = {w.id: w for w in (top, act, scene)}
+
+    segments = resolve(performed(number), works).segments
+
+    assert inherited_composers(segments) == (SCHIKANEDER,)
+
+
+def test_no_composers_are_inherited_from_works_not_looked_up():
+    number = without_composers(recording("zauberfloete", 1, 2))
+    segments = resolve(performances(number), {}).segments
+    assert inherited_composers(segments) == ()
+
+
+def test_apply_composer_tags_adds_to_picards():
+    linked = work("l", "Song", composers=[SCHIKANEDER])
+    unlinked = work("u", "Opera: No. 1", parents=[link("t", "Opera", 1)])
+    works = {"t": work("t", "Opera", composers=[MOZART, SCHIKANEDER])}
+    segments = resolve(performed(linked, unlinked), works).segments
+    metadata = FakeMetadata()
+    # As Picard tags it, from the linked work's composer.
+    metadata["composer"] = ["Emanuel Schikaneder"]
+    metadata["composersort"] = ["Schikaneder, Emanuel"]
+    metadata["musicbrainz_composerid"] = ["s"]
+
+    apply_composer_tags(metadata, segments)
+
+    expected = {
+        "composer": ["Emanuel Schikaneder", "Wolfgang Amadeus Mozart"],
+        # Without a sort name, the name.
+        "composersort": ["Schikaneder, Emanuel", "Wolfgang Amadeus Mozart"],
+        "musicbrainz_composerid": ["s", MOZART.id],
+    }
+    assert metadata == expected
+    # Applying again, as each level of ancestors arrives, adds nothing.
+    apply_composer_tags(metadata, segments)
+    assert metadata == expected
+
+
+def test_apply_composer_tags_keeps_other_values():
+    unlinked = work("u", "Opera: No. 1", parents=[link("t", "Opera", 1)])
+    works = {"t": work("t", "Opera", composers=[MOZART])}
+    segments = resolve(performed(unlinked), works).segments
+    metadata = FakeMetadata()
+    # Set by something else, without an ID.
+    metadata["composer"] = ["W. A. Mozart"]
+
+    apply_composer_tags(metadata, segments)
+
+    assert metadata["composer"] == ["W. A. Mozart", "Wolfgang Amadeus Mozart"]
+    assert metadata["musicbrainz_composerid"] == [MOZART.id]
+
+
+def test_inherited_composers_are_unique_by_id():
+    renamed = Artist(MOZART.id, "Mozart")
+    first = work("a", "Opera A: No. 1", parents=[link("ta", "Opera A", 1)])
+    second = work("b", "Opera B: No. 1", parents=[link("tb", "Opera B", 1)])
+    works = {
+        "ta": work("ta", "Opera A", composers=[MOZART]),
+        "tb": work("tb", "Opera B", composers=[renamed]),
+    }
+    segments = resolve(performed(first, second), works).segments
+
+    assert [artist.id for artist in inherited_composers(segments)] == [MOZART.id]
+
+
+def test_apply_composer_tags_leaves_tags_alone_when_nothing_is_inherited():
+    segments = resolve(performances(recording("zauberfloete", 1, 2)), ALL_WORKS).segments
+    metadata = FakeMetadata()
+    apply_composer_tags(metadata, segments)
+    assert metadata == {}
+    assert metadata.deleted == set()
 
 
 # Work and movement from titles

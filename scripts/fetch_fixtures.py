@@ -1,6 +1,6 @@
 """Download test fixtures from the MusicBrainz web service.
 
-Fetches each release the way Picard 2 does with "Use track relationships"
+Fetches each release the way Picard 3 does with "Use track relationships"
 enabled, plus every ancestor work the plugin would look up, and saves them
 under tests/fixtures/, without the parts neither Picard nor the plugin needs.
 
@@ -17,11 +17,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Load the module from its file: importing the work_hierarchy package would
-# import Picard.
-_spec = importlib.util.spec_from_file_location(
-    "hierarchy", ROOT / "src" / "work_hierarchy" / "hierarchy.py"
-)
+# Load the module from its file: it doesn't need Picard, unlike the plugin's
+# __init__.py.
+_spec = importlib.util.spec_from_file_location("hierarchy", ROOT / "hierarchy.py")
 assert _spec and _spec.loader
 hierarchy = importlib.util.module_from_spec(_spec)
 sys.modules["hierarchy"] = hierarchy
@@ -36,12 +34,13 @@ RELEASES = {
     "zauberfloete": "571f466c-c2fc-4f82-bacc-16e68389e608",
 }
 
-# The inc parameters Picard 2.13 uses for a release lookup with track
+# The inc parameters Picard 3.0 uses for a release lookup with track
 # relationships enabled (see Album.load in picard/album.py).
 RELEASE_INC = [
     "aliases", "annotation", "artist-credits", "artists", "collections", "discids", "isrcs",
-    "labels", "media", "recordings", "release-groups", "artist-rels", "recording-rels",
-    "release-group-level-rels", "release-rels", "series-rels", "url-rels", "work-rels",
+    "labels", "media", "recordings", "release-groups", "artist-rels", "label-rels",
+    "recording-rels", "release-group-level-rels", "release-rels", "series-rels", "url-rels",
+    "work-rels",
     "recording-level-rels", "work-level-rels",
 ]  # fmt: skip
 

@@ -1,48 +1,45 @@
 """Test helpers.
 
-The plugin tests drive Picard 2's real album and track loading code with the
-plugin registered. Only the application object and the MusicBrainz web
-service are faked; work lookups are answered from tests/fixtures/works.
+The plugin tests drive Picard 3's real album and track loading code with the
+plugin loaded and enabled through Picard's own plugin classes. Only the
+application object and the web service are faked; work lookups are answered
+from tests/fixtures/works.
 """
 
 import importlib
-import json
 import pkgutil
 from collections.abc import Callable
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import picard.ui.options
 import pytest
 from picard import config
+from picard.extension_points import set_plugin_uuid, unset_plugin_uuid
 from picard.i18n import setup_gettext
-from PyQt5 import QtCore, QtNetwork
-
-FIXTURES = Path(__file__).parent / "fixtures"
-WORKS = FIXTURES / "works"
-
-
-def load_fixture(name: str) -> dict:
-    return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+from picard.plugin3.api import PluginApi
+from picard.tagger import Tagger
+from PyQt6 import QtCore, QtNetwork
+from support import installed_plugin, load_work
 
 
-def load_work(work_id: str) -> dict:
-    return json.loads((WORKS / f"{work_id}.json").read_text(encoding="utf-8"))
-
-
-class FakeMBAPI:
+class FakeWebService(QtCore.QObject):
     """Records work lookups and answers them from the fixtures on demand."""
 
+    pending_requests_changed = QtCore.pyqtSignal()
+
     def __init__(self) -> None:
+        super().__init__()
         self.queue: list[tuple[str, Callable]] = []
         self.requested: list[str] = []
         self.calls: list[dict] = []
 
-    def _get_by_id(self, entitytype, entityid, handler, inc=None, **kwargs):
-        assert entitytype == "work"
-        self.calls.append({"inc": inc, **kwargs})
-        self.requested.append(entityid)
-        self.queue.append((entityid, handler))
+    def get_url(self, url, handler, **kwargs):
+        entity, work_id = url.path().split("/")[-2:]
+        assert entity == "work"
+        self.calls.append(kwargs)
+        self.requested.append(work_id)
+        self.queue.append((work_id, handler))
+        return MagicMock()
 
     def serve(self, fail: frozenset[str] = frozenset()) -> None:
         """Answer queued lookups, including ones made while answering."""
@@ -54,15 +51,19 @@ class FakeMBAPI:
             else:
                 handler(load_work(work_id), MagicMock(), None)
 
+    @property
+    def num_pending_web_requests(self) -> int:
+        return len(self.queue)
+
 
 class FakeTagger(QtCore.QObject):
     tagger_stats_changed = QtCore.pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
-        self.mb_api = FakeMBAPI()
+        self.webservice = FakeWebService()
+        self.mb_api = MagicMock()
         self.window = MagicMock()
-        self.webservice = MagicMock()
         self.files: dict = {}
         self.albums: dict = {}
         self.stopping = False
@@ -73,61 +74,48 @@ class FakeTagger(QtCore.QObject):
         return ReleaseGroup(rg_id)
 
 
-def _default_settings() -> dict:
+def _register_default_options() -> None:
     # Options register their defaults when the modules declaring them are
-    # imported, so import every options page, and the plugin, first.
+    # imported.
     for module in pkgutil.iter_modules(picard.ui.options.__path__):
         importlib.import_module(f"picard.ui.options.{module.name}")
-    importlib.import_module("work_hierarchy")
-    return {
-        name: option.default
-        for (section, name), option in config.Option.registry.items()
-        if section == "setting"
-    }
 
 
-_DEFAULTS: dict | None = None
+class PicardEnv:
+    def __init__(self, tagger, settings, plugin):
+        self.tagger = tagger
+        self.web = tagger.webservice
+        self.settings = settings
+        self.plugin = plugin
+        #: The plugin as Picard loaded it (picard.plugins.work_hierarchy_<uuid>).
+        self.module = plugin._module
+        self.plugin_config = PluginApi._instances[plugin.module_name].plugin_config
 
 
 @pytest.fixture
-def picard_env(monkeypatch):
-    """A fresh fake Picard application with track relationships enabled."""
-    global _DEFAULTS
-    setup_gettext(None, "C")
-    if _DEFAULTS is None:
-        _DEFAULTS = _default_settings()
-
-    import work_hierarchy
-
-    fake_config = MagicMock()
-    fake_config.setting = dict(_DEFAULTS, release_ars=True, track_ars=True)
-    fake_config.persist = {}
-    fake_config.profiles = {}
-    monkeypatch.setattr(config, "config", fake_config)
+def picard_env(monkeypatch, tmp_path):
+    """A fresh fake Picard with track relationships and the plugin enabled."""
+    setup_gettext(None, "C", MagicMock())
+    _register_default_options()
 
     tagger = FakeTagger()
-    monkeypatch.setattr(QtCore.QObject, "tagger", tagger, raising=False)
     monkeypatch.setattr(QtCore.QCoreApplication, "instance", lambda: tagger)
-    monkeypatch.setattr(work_hierarchy, "_store", work_hierarchy.WorkStore())
-    return tagger, fake_config.setting
+    monkeypatch.setattr(Tagger, "instance", staticmethod(lambda: tagger))
+    real_config = config.Config.from_file(None, str(tmp_path / "Picard.ini"))
+    monkeypatch.setattr(config, "config", real_config)
+    settings = real_config.setting
+    settings["release_ars"] = True
+    settings["track_ars"] = True
 
-
-def start_album_load(release: dict):
-    """Load a release into a real Album as if the web service returned it.
-
-    Returns once the release is parsed; the plugin's work lookups are left
-    queued on the fake web service.
-    """
-    from picard.album import Album
-    from picard.metadata import Metadata
-
-    album = Album(release["id"])
-    album.item = MagicMock()
-    # The state Album.load() sets up before requesting the release.
-    album._new_metadata = Metadata()
-    album._new_tracks = []
-    album._requests = 1
-    album.loaded = False
-    album.load_task = object()
-    album._release_request_finished(release, None, None)
-    return album
+    plugin = installed_plugin(tmp_path / "plugins3")
+    plugin_uuid = plugin.uuid
+    assert plugin_uuid
+    plugin.load_module()
+    try:
+        plugin.enable(tagger)
+        set_plugin_uuid(plugin_uuid, plugin.plugin_id)
+        settings["plugins3_enabled_plugins"] = [plugin_uuid]
+        yield PicardEnv(tagger, settings, plugin)
+    finally:
+        plugin.disable()
+        unset_plugin_uuid(plugin_uuid)

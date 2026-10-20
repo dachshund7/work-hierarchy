@@ -21,14 +21,17 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from typing import Protocol
 
     class MetadataLike(Protocol):
         """The subset of picard.metadata.Metadata used for writing tags."""
+
+        def getall(self, name: str) -> list[str]: ...
 
         def __setitem__(self, name: str, values: Any) -> None: ...
 
@@ -82,6 +85,7 @@ class WorkLink:
 class Artist:
     id: str
     name: str
+    sort_name: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -103,7 +107,9 @@ class WorkInfo:
         for rel in node.get("relations") or ():
             if rel.get("target-type") == "artist" and rel.get("type") == "composer":
                 artist = rel.get("artist") or {}
-                composer = Artist(artist.get("id") or "", artist.get("name") or "")
+                composer = Artist(
+                    artist.get("id") or "", artist.get("name") or "", artist.get("sort-name") or ""
+                )
                 if composer.id and composer not in composers:
                     composers.append(composer)
                 continue
@@ -397,6 +403,48 @@ def to_json(segments: Sequence[Segment]) -> str:
     return json.dumps(document, ensure_ascii=False, separators=(",", ":"))
 
 
+def inherited_composers(segments: Sequence[Segment]) -> tuple[Artist, ...]:
+    """Composers of ancestor works, for performed works that have none.
+
+    MusicBrainz often links a composer to a work but not to its parts. Each
+    performed work without composers takes those of its nearest ancestor that
+    has some.
+    """
+    result: dict[str, Artist] = {}
+    for segment in segments:
+        if segment.work.composers:
+            continue
+        for node in reversed(segment.path[:-1]):
+            if node.composers:
+                for artist in node.composers:
+                    result.setdefault(artist.id, artist)
+                break
+    return tuple(result.values())
+
+
+def apply_composer_tags(metadata: MetadataLike, segments: Sequence[Segment]) -> None:
+    """Add inherited composers (see inherited_composers) to the composer tags.
+
+    Composers already in the tags, by ID, are not added again, so a track
+    with linked and unlinked works keeps Picard's names for the linked ones,
+    and the tags can be updated again each time more ancestors are known.
+    Other values are left as they are.
+    """
+    present = set(metadata.getall("musicbrainz_composerid"))
+    extra = [artist for artist in inherited_composers(segments) if artist.id not in present]
+    if not extra:
+        return
+    metadata["composer"] = [*metadata.getall("composer"), *(artist.name for artist in extra)]
+    metadata["composersort"] = [
+        *metadata.getall("composersort"),
+        *(artist.sort_name or artist.name for artist in extra),
+    ]
+    metadata["musicbrainz_composerid"] = [
+        *metadata.getall("musicbrainz_composerid"),
+        *(artist.id for artist in extra),
+    ]
+
+
 def apply_tags(
     metadata: MetadataLike,
     segments: Sequence[Segment],
@@ -573,7 +621,7 @@ def _numeral_value(numeral: str) -> int | None:
     if not _ROMAN_RE.match(numeral):
         return None
     total = 0
-    for char, following in zip(numeral, numeral[1:] + " "):
+    for char, following in zip(numeral, numeral[1:] + " ", strict=False):
         value = _ROMAN_VALUES[char]
         total += -value if value < _ROMAN_VALUES.get(following, 0) else value
     return total

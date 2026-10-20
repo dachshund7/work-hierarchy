@@ -1,4 +1,4 @@
-# Work Hierarchy: a MusicBrainz Picard 2 plugin
+# Work Hierarchy: a MusicBrainz Picard 3 plugin
 
 Tags classical music with its work and movement structure from MusicBrainz:
 
@@ -18,20 +18,29 @@ one.
 
 ## Requirements
 
-- Picard 2.9 to 2.13.
+- Picard 3. (Version 0.1 of this plugin is for Picard 2.9 to 2.13.)
 - **Options → Metadata → "Use track relationships"** must be enabled. Without it
   MusicBrainz doesn't send work relationships, and the plugin leaves tags
   alone.
 
 ## Installing
 
-```sh
-uv run scripts/build_plugin.py
+In Picard, go to **Options → Plugins**, click **Install plugin…**, and on the
+**URL** tab enter
+
+```
+https://github.com/dachshund7/work-hierarchy
 ```
 
-This writes `dist/work_hierarchy.zip`. In Picard, go to **Options → Plugins**,
-click **Install plugin…**, choose the zip, and enable "Work Hierarchy". (You can
-also copy the zip into `~/.config/MusicBrainz/Picard/plugins/` on Linux.)
+leaving **Ref** empty. Or from a terminal:
+
+```sh
+picard-cli plugins install https://github.com/dachshund7/work-hierarchy
+```
+
+The plugin isn't in Picard's plugin registry, so Picard warns that it's
+unregistered before installing it. Updates are installed from **Options →
+Plugins** like any other plugin's.
 
 ## What gets written
 
@@ -88,6 +97,12 @@ The rules:
   what MusicBrainz links.
 - Otherwise, if the recording has no work relationships, the movement tags
   and `work_hierarchy` are deleted so stale values don't linger in files.
+- When a performed work has no composer on MusicBrainz, but a work above it
+  does, the nearest such work's composers are added to `composer`,
+  `composersort` and `musicbrainz_composerid`. They're added after any
+  composers Picard set for the track's other works, using their MusicBrainz
+  names (not translated or as credited). Turn this off in **Options →
+  Plugins → Work Hierarchy**.
 - `musicbrainz_workid` is left as Picard sets it: the IDs of the works the
   recording performs. Picard's original `work` and `musicbrainz_workid` values
   are kept in the `_recording_work` and `_recording_workid` script variables,
@@ -184,10 +199,12 @@ A JSON object. Track 4 above:
     and `position`.
   - `composers`: the work's composers as linked on MusicBrainz, each with
     `id` (MusicBrainz artist ID) and `name`; `null` if the work's own data
-    couldn't be looked up. Picard's `composer` tag names only the composers
-    of the performed works, possibly as credited or translated, while these
-    are their MusicBrainz names. Compare `id` with `musicbrainz_artistid` to
-    tell whether the track artist is the composer.
+    couldn't be looked up. Picard's own `composer` and
+    `musicbrainz_composerid` tags cover only the performed works, and
+    `composer` may be as credited or translated, while these are given for
+    every level of the hierarchy, with their MusicBrainz names. A part's
+    `composers` are empty when MusicBrainz links the composer only to its
+    parent, even when the composer tags are inherited (see above).
 
 ### Grouping
 
@@ -205,15 +222,17 @@ A JSON object. Track 4 above:
 When Picard loads an album, the release data already includes, for each
 recording, the works it performs and each work's immediate parent. The plugin
 looks up each parent with `/ws/2/work/<id>?inc=work-rels+artist-rels` to find
-the next level up, how many parts it has and who composed it, and repeats until it reaches a top-level
-work. Lookups are shared between tracks (twenty tracks of three suites cost
-three requests) and cached for 10 minutes. Picard waits for them before
-finishing the album. If a lookup fails, the affected tracks are tagged with
-the levels that are known, and the album still loads.
+the next level up, how many parts it has and who composed it, and repeats
+until it reaches a top-level work. Lookups are shared between tracks (twenty
+tracks of three suites cost three requests) and cached for 10 minutes. Picard
+waits for them before finishing the album. If a lookup fails, or is stopped
+with Picard's Stop button, the affected tracks are tagged with the levels that
+are known, and the album still loads.
 
 For standalone recordings ("non-album tracks"), Picard finishes loading before
-the lookups return, so the plugin updates the track and its files once they
-arrive.
+the lookups return. Once they arrive, the plugin tags the track, runs the
+tagger scripts on it again, as Picard does when loading, and updates its files.
+Changes made to the track in Picard before then are lost.
 
 ## Development
 
@@ -224,21 +243,60 @@ uv run ruff check . && uv run ruff format --check .
 uv run ty check
 ```
 
-- `src/work_hierarchy/hierarchy.py`: resolution, naming and tag logic, with no
-  Picard dependency.
-- `src/work_hierarchy/__init__.py`: the Picard plugin (metadata processor, work
-  lookups, options page).
+The repository is the plugin: Picard installs it by cloning it, and loads
+`MANIFEST.toml` and `__init__.py` from the top level.
+
+- `hierarchy.py`: resolution, naming and tag logic, with no Picard
+  dependency.
+- `__init__.py`: the Picard plugin (metadata processor, work lookups, options
+  page).
 - `tests/test_hierarchy.py`: the logic, against real MusicBrainz data.
-- `tests/test_plugin.py`: the plugin running inside Picard 2.13's real album
-  and track loading code, with only the web service faked.
-- `tests/test_install.py`: the built zip loading through Picard's plugin
-  manager, and the options page.
+- `tests/test_plugin.py`: the plugin, loaded by Picard's own plugin code,
+  running inside Picard 3's real album and track loading code, with only the
+  web service faked.
+- `tests/test_install.py`: the working tree installing from git through
+  Picard's plugin manager, and the options page.
+- `locale/en.toml`: the interface text, in English; see Translating below.
+- `tests/test_translations.py`: `locale/en.toml` against the text in the
+  code, and a translation being used.
+- `conftest.py`: stops pytest importing the top-level `__init__.py`, which
+  only works inside Picard.
 - `scripts/fetch_fixtures.py`: re-downloads the test fixtures in
   `tests/fixtures/`.
 
 The development environment uses Python 3.14, but the plugin runs on the
-Python bundled with Picard (3.7+ for Picard 2.9+), so the plugin code avoids
-newer syntax. Ruff targets 3.7 for `src/`, and the logic has been run on 3.8.
+Python bundled with Picard (3.10+ for Picard 3), so the plugin code avoids
+newer syntax. Ruff and ty target 3.10 for the plugin's files.
+
+To try changes in Picard without committing them, install from the **Local**
+tab instead, choosing this directory and ticking **Load in-place (ignore
+git)**. Picard then loads the plugin from here, and changes take effect the
+next time it starts. Uninstall any copy installed from GitHub first: both have
+the same UUID.
+
+## Translating
+
+The options page's text is in `locale/en.toml`. To translate it, copy that
+file to `locale/<language>.toml`, for example `locale/de.toml` or
+`locale/pt_BR.toml`, and translate the values, keeping the keys. Picard uses
+the file for its interface language, and English for any text it doesn't
+have.
+
+The plugin's name and descriptions, shown in Picard's plugin list, are
+translated in `MANIFEST.toml` instead, in `[name_i18n]`, `[description_i18n]`
+and `[long_description_i18n]` tables:
+
+```toml
+[name_i18n]
+de = "Werkhierarchie"
+```
+
+`locale/en.toml` repeats them under `manifest.*` keys, as other Picard plugins
+do, so translators have all the text in one place.
+
+When adding interface text to the code, use `self.api.tr("key", "English
+text")` (or `t_()` for class attributes), and add the key and text to
+`locale/en.toml`; the tests check the two match.
 
 ## License
 
