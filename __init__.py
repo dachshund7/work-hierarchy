@@ -1,6 +1,8 @@
 import time
 import traceback
 import uuid
+import weakref
+from collections import ChainMap
 from functools import partial
 from typing import ClassVar
 
@@ -8,6 +10,7 @@ from picard.album_requests import TaskType
 from picard.plugin3.api import OptionsPage, PageOptionConfigs, PluginApi, t_
 from picard.track import NonAlbumTrack
 from PyQt6 import QtWidgets
+from PyQt6.QtNetwork import QNetworkReply
 
 from .hierarchy import (
     WORK_LEVEL_PARENT,
@@ -64,58 +67,77 @@ class WorkStore:
             self._api = None
 
     def request(self, api, work_id, callback):
-        """Look up a work, then call ``callback(work_id, succeeded)``."""
+        """Look up a work, then call ``callback(work_id, work, stopped)``.
+
+        ``work`` is the WorkInfo, or None if the lookup failed. ``stopped``
+        is true if it failed because the user stopped network requests.
+        """
         if work_id in self._pending:
             self._pending[work_id].append(callback)
             return
         self._pending[work_id] = [callback]
-        api.mb_api.get(
-            f"/work/{work_id}",
-            partial(self._received, api, work_id),
-            unencoded_queryargs={"inc": "artist-rels+work-rels"},
-            priority=True,
-            important=False,
-        )
+        try:
+            api.mb_api.get(
+                f"/work/{work_id}",
+                partial(self._received, api, work_id),
+                unencoded_queryargs={"inc": "artist-rels+work-rels"},
+                priority=True,
+                important=False,
+            )
+        except Exception:
+            # Nothing will answer, so later tracks mustn't wait for it.
+            del self._pending[work_id]
+            raise
 
     def _received(self, api, work_id, response, reply, error):
-        succeeded = False
-        if error:
+        work = None
+        stopped = False
+        if error == QNetworkReply.NetworkError.OperationCanceledError:
+            # Picard only reports cancelled requests to their handlers when
+            # the user stops network requests.
+            api.logger.info("Lookup of work %s was stopped", work_id)
+            stopped = True
+        elif error:
             api.logger.warning("Could not load work %s: %s", work_id, error)
         else:
             try:
                 work = WorkInfo.from_json(response)
                 self._works[work_id] = (self._clock(), work)
-                succeeded = True
             except Exception:
                 api.logger.error("Could not read work %s: %s", work_id, traceback.format_exc())
-        self._notify(api, work_id, succeeded)
+        self._notify(api, work_id, work, stopped)
 
     def _requests_changed(self):
         """Fail lookups the web service no longer has.
 
-        Stopping network requests drops queued requests without calling
-        their handlers. Without this, the lookups would stay pending, and
-        every later track needing those works would wait for them forever.
-        A lookup counts as a pending request until its handler is called, so
-        if the web service has none while lookups are pending, they were
-        dropped.
+        Picard drops some requests without calling their handlers: queued
+        requests when the user stops network requests, and cancelled ones
+        (a transfer timeout, say) at other times. Without this, the lookups
+        would stay pending, and every later track needing those works would
+        wait for them forever. A lookup counts as a pending request until
+        its handler is called, so if the web service has none while lookups
+        are pending, they were dropped.
         """
         api = self._api
         if api is None or not self._pending or api.web_service.num_pending_web_requests:
             return
         for work_id in list(self._pending):
-            api.logger.warning("Lookup of work %s was stopped", work_id)
-            self._notify(api, work_id, False)
+            api.logger.warning("Lookup of work %s got no response", work_id)
+            self._notify(api, work_id, None)
 
-    def _notify(self, api, work_id, succeeded):
+    def _notify(self, api, work_id, work, stopped=False):
         for callback in self._pending.pop(work_id, []):
             try:
-                callback(work_id, succeeded)
+                callback(work_id, work, stopped)
             except Exception:
                 api.logger.error("%s", traceback.format_exc())
 
 
 _store = WorkStore()
+
+#: The ID of each track's current job, so a job can tell when the track has
+#: been reloaded. IDs rather than jobs, as a job holds its track.
+_current_jobs = weakref.WeakKeyDictionary()
 
 
 class TrackJob:
@@ -149,8 +171,13 @@ class TrackJob:
         self.segments = ()
         self.failed = set()
         self.waiting = set()
+        #: Works this job has received or used. The store's cache expires
+        #: works after a while, which a long queue of lookups can outlast.
+        self.known = {}
+        self.job_id = uuid.uuid4().hex
         self.task_id = None
         self.in_processor = False
+        self.stopped = False
         self.finished = False
 
     @property
@@ -159,6 +186,7 @@ class TrackJob:
 
     def start(self):
         """Run from the track metadata processor."""
+        _current_jobs[self.track] = self.job_id
         self.in_processor = True
         try:
             self.run()
@@ -172,14 +200,39 @@ class TrackJob:
             self.api.logger.error("%s", traceback.format_exc())
             done = True
         if done:
-            try:
-                self._finish()
-            except Exception:
-                self.api.logger.error("%s", traceback.format_exc())
+            self._finish_safely()
+
+    def _finish_safely(self):
+        try:
+            self._finish()
+        except Exception:
+            self.api.logger.error("%s", traceback.format_exc())
+
+    def _abandoned(self):
+        """Whether the track no longer needs this job.
+
+        True if the track was reloaded, its album was removed, stopped or
+        reloaded, or a standalone recording was removed.
+        """
+        if _current_jobs.get(self.track) != self.job_id:
+            return True
+        album = self.track.album
+        if album is None:
+            return True
+        if self.task_id is not None and self.task_id not in album._pending_tasks:
+            return True
+        return self.standalone and self.track not in album.tracks
 
     def _advance(self):
         """Tag the track with what is known; return whether that is all there is."""
-        resolution = resolve(self.performed, self.store.works(), self.failed)
+        if self._abandoned():
+            return True
+        works = ChainMap(self.known, self.store.works())
+        resolution = resolve(self.performed, works, self.failed)
+        for segment in resolution.segments:
+            for node in segment.path:
+                if node.id in works:
+                    self.known[node.id] = works[node.id]
         self.segments = resolution.segments
         # A standalone recording's tags are written once loading has
         # finished, in _finish.
@@ -211,12 +264,18 @@ class TrackJob:
         if self.inherit_composers:
             apply_composer_tags(metadata, self.segments)
 
-    def _received(self, work_id, succeeded):
+    def _received(self, work_id, work, stopped=False):
         if self.finished:
-            # Lookups still in flight when the job stopped on an error.
+            # Lookups still in flight when the job stopped.
             return
-        if not succeeded:
+        if stopped:
+            self.stopped = True
+            self._finish_safely()
+            return
+        if work is None:
             self.failed.add(work_id)
+        else:
+            self.known[work_id] = work
         self.waiting.discard(work_id)
         if not self.waiting:
             self.run()
@@ -237,9 +296,11 @@ class TrackJob:
         if album is None or task_id not in album._pending_tasks:
             return
         album.complete_task(task_id)
+        # When the user stops network requests, Picard then aborts the albums
+        # still loading, so they aren't shown as loaded with tags missing.
         # While the track processors run, Picard finishes the album itself
         # once they return.
-        if not self.in_processor and not album.loaded:
+        if not self.stopped and not self.in_processor and not album.loaded:
             album._finalize_loading(None)
 
     def _update_standalone_track(self):
@@ -252,8 +313,8 @@ class TrackJob:
         scripts see them, and the files updated.
         """
         track = self.track
-        if not track.loaded:
-            # Being reloaded, which runs a new job.
+        if not track.loaded or self._abandoned():
+            # Being reloaded, which runs a new job, or removed.
             return
         self._apply_tags(track.orig_metadata)
         track.metadata.copy(track.orig_metadata)
@@ -290,8 +351,10 @@ def process_track(api, track, metadata, track_node, release_node=None):
 
 
 class WorkHierarchyOptionsPage(OptionsPage):
-    # The interface text is translated from locale/<language>.toml; the
-    # English text, in locale/en.toml, is also given here as the fallback.
+    # The interface text is translated from locale/<language>.toml. The
+    # tr() calls also give the English text, used when there is no
+    # translation; the title, marked with t_(), has no such fallback, so it
+    # relies on locale/en.toml (the tests check it is there).
     NAME = "work_hierarchy"
     TITLE = t_("options.title", "Work Hierarchy")
     PARENT = "plugins"

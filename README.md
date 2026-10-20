@@ -225,9 +225,11 @@ looks up each parent with `/ws/2/work/<id>?inc=work-rels+artist-rels` to find
 the next level up, how many parts it has and who composed it, and repeats
 until it reaches a top-level work. Lookups are shared between tracks (twenty
 tracks of three suites cost three requests) and cached for 10 minutes. Picard
-waits for them before finishing the album. If a lookup fails, or is stopped
-with Picard's Stop button, the affected tracks are tagged with the levels that
-are known, and the album still loads.
+waits for them before finishing the album. If a lookup fails, the affected
+tracks are tagged with the levels that are known, and the album still loads.
+Picard's Stop button stops the lookups too, and the albums still loading are
+shown as stopped, as with Picard's own requests, rather than as loaded with
+the hierarchy incomplete.
 
 For standalone recordings ("non-album tracks"), Picard finishes loading before
 the lookups return. Once they arrive, the plugin tags the track, runs the

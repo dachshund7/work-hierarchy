@@ -6,10 +6,11 @@ import logging
 import weakref
 from unittest.mock import MagicMock
 
-from picard.album import NatAlbum
+from picard.album import AlbumStatus, NatAlbum
 from picard.metadata import Metadata, track_metadata_processors
 from picard.track import NonAlbumTrack
-from support import load_fixture, start_album_load
+from PyQt6 import QtNetwork
+from support import load_fixture, load_work, start_album_load
 
 BWV_831 = "13c7fae5-83ee-4a34-be2f-efbf7a0e6639"
 ZAUBERFLOETE = "e208c5f5-5d37-3dfc-ac0b-999f207c9e46"
@@ -267,13 +268,58 @@ def test_stopped_lookups_do_not_block_later_albums(picard_env, caplog):
     assert plugin_errors(caplog) == []
 
 
+def zauberfloete_by_acts():
+    """The release without the numbers that are parts of the opera itself.
+
+    The rest are parts of an act, so the opera is only looked up once an
+    act has arrived.
+    """
+    release = load_fixture("zauberfloete")
+    for medium in release["media"]:
+        medium["tracks"] = [
+            track
+            for track in medium["tracks"]
+            if not any(
+                rel.get("type") == "parts"
+                and rel.get("direction") == "backward"
+                and rel["work"]["id"] == ZAUBERFLOETE
+                for performance in track["recording"]["relations"]
+                if performance.get("type") == "performance"
+                for rel in performance["work"].get("relations", [])
+            )
+        ]
+    return release
+
+
 def test_removed_album_is_not_finished(picard_env, caplog):
-    album = start_album_load(load_fixture("zauberfloete"))
+    web = picard_env.web
+    album = start_album_load(zauberfloete_by_acts())
+    assert sorted(web.requested) == sorted([AKT_I, AKT_II])
     # What Picard does when an album is removed.
     album.cancel_tasks()
-    picard_env.web.serve()
+    web.serve()
 
     assert not album.loaded
+    # The acts' lookups were already queued; the opera isn't looked up.
+    assert sorted(web.requested) == sorted([AKT_I, AKT_II])
+    assert plugin_errors(caplog) == []
+
+
+def test_stop_aborts_albums_with_lookups_in_progress(picard_env, caplog):
+    web = picard_env.web
+    album = start_album_load(load_fixture("zauberfloete"))
+    # What Picard's Stop does: the handlers of requests in progress are
+    # called with a cancellation error, queued requests are dropped, albums
+    # still loading are aborted, and pending requests are reported changed.
+    in_progress, web.queue = web.queue, []
+    for _, handler in in_progress:
+        handler(b"", MagicMock(), QtNetwork.QNetworkReply.NetworkError.OperationCanceledError)
+    if not album.loaded:
+        album.abort_loading("Stopped by user")
+    web.pending_requests_changed.emit()
+
+    # Shown as stopped, not as loaded with the hierarchy tags incomplete.
+    assert album.status == AlbumStatus.ERROR
     assert plugin_errors(caplog) == []
 
 
@@ -287,6 +333,47 @@ def test_removed_album_that_is_gone(picard_env, caplog):
     picard_env.web.serve()
 
     assert plugin_errors(caplog) == []
+
+
+def test_request_that_fails_to_send_is_sent_again(picard_env, monkeypatch):
+    web = picard_env.web
+    get_url = web.get_url
+    failed = []
+
+    def get_url_failing_once(url, handler, **kwargs):
+        if not failed:
+            failed.append(url)
+            raise RuntimeError("broken")
+        return get_url(url, handler, **kwargs)
+
+    monkeypatch.setattr(web, "get_url", get_url_failing_once)
+    album = start_album_load(load_fixture("zauberfloete"))
+    web.serve()
+
+    # The other tracks needing that work looked it up again.
+    assert failed
+    assert album.loaded
+    assert not album.has_critical_tasks()
+
+
+def test_lookups_outlasting_the_cache_are_not_repeated(picard_env, monkeypatch):
+    web, module = picard_env.web, picard_env.module
+    now = [0.0]
+    monkeypatch.setattr(module, "_store", module.WorkStore(clock=lambda: now[0]))
+    album = start_album_load(zauberfloete_by_acts())
+
+    # The acts arrive, then the opera after the cache has expired them,
+    # as when a long queue of lookups is ahead of it.
+    acts, web.queue = web.queue, []
+    assert sorted(work_id for work_id, _ in acts) == sorted([AKT_I, AKT_II])
+    for work_id, handler in acts:
+        handler(load_work(work_id), MagicMock(), None)
+    now[0] = 700.0
+    web.serve()
+
+    assert sorted(web.requested) == sorted([AKT_I, AKT_II, ZAUBERFLOETE])
+    assert album.loaded
+    assert all(t.metadata["work"] == "Die Zauberflöte, K. 620" for t in album.tracks)
 
 
 def test_error_while_requesting_still_loads_the_album(picard_env, monkeypatch):
@@ -428,3 +515,20 @@ def test_standalone_recording_runs_scripts_on_the_new_tags(picard_env):
     assert t.orig_metadata["work"] == "Die Zauberflöte, K. 620"
     [file_metadata] = file.copy_metadata.call_args.args
     assert file_metadata["work"] == "DIE ZAUBERFLÖTE, K. 620"
+
+
+def test_refreshed_standalone_recording_keeps_its_new_tags(picard_env):
+    web = picard_env.web
+    recording = load_fixture("zauberfloete")["media"][0]["tracks"][1]["recording"]
+    t, _ = load_standalone(picard_env, recording)
+    assert web.queue  # The act's lookup is waiting.
+
+    # Refreshed meanwhile, after its work was unlinked on MusicBrainz.
+    t.load()
+    t._parse_recording({**recording, "relations": []})
+    assert "work_hierarchy" not in t.metadata
+    web.serve()
+
+    # The earlier lookups don't bring the old work back.
+    assert "work_hierarchy" not in t.metadata
+    assert "work_hierarchy" not in t.orig_metadata

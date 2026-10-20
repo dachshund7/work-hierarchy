@@ -44,7 +44,7 @@ RELEASE_INC = [
     "recording-level-rels", "work-level-rels",
 ]  # fmt: skip
 
-USER_AGENT = "picard-work-hierarchy-fixtures/0.1 ( https://github.com/metabrainz/picard )"
+USER_AGENT = "picard-work-hierarchy-fixtures/0.2 ( https://github.com/dachshund7/work-hierarchy )"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 _last_request = 0.0

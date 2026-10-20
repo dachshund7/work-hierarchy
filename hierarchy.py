@@ -58,6 +58,12 @@ MAX_DEPTH = 12
 _WORD_RE = re.compile(r"\w+")
 _SEPARATORS = ":.,;/|-–—"
 _LEADING_SEPARATORS_RE = re.compile(r"^[\s:.,;/|\-–—]+")
+#: What can come between a parent's last word and the separator: anything
+#: but words and separators, such as the closing quotes, brackets and "!"
+#: in "Symphony no. 9, op. 125 “Choral”: I. Allegro", 'Kantate, BWV 214
+#: "Tönet, ihr Pauken! Erschallet, Trompeten!": I. Coro' or "Kantate, BWV
+#: 4 „Christ lag in Todesbanden“: I. Sinfonia", in any quoting style.
+_BEFORE_SEPARATOR_RE = re.compile(rf"^[^\w{re.escape(_SEPARATORS)}]*")
 #: A movement title in MusicBrainz style, "<Work>: <Roman numeral>. <Movement>".
 _TITLE_MOVEMENT_RE = re.compile(r"^(?P<work>.+):\s+(?P<num>[IVXLCDM]+)\.\s+(?P<movement>\S.*)$")
 _NUMERAL_RE = re.compile(r"^(?P<num>[IVXLCDM]+|\d+)\.\s+(?=\S)")
@@ -582,7 +588,8 @@ def _parent_prefix_end(child: str, parent: str) -> int:
     The prefix must start with the parent's first word, consist of words
     found in order in the parent's title (case and accent insensitive; parent
     words may be skipped, as in "Die Zauberflöte" for "Die Zauberflöte, K.
-    620") and be followed by a separator. Returns 0 when there is no prefix.
+    620") and be followed by a separator, possibly after closing quotes,
+    brackets or other punctuation. Returns 0 when there is no prefix.
     """
     parent_words = [_fold(word) for word in _WORD_RE.findall(parent)]
     if not parent_words:
@@ -601,8 +608,8 @@ def _parent_prefix_end(child: str, parent: str) -> int:
             if index == len(parent_words):
                 break
             index += 1
-        rest = child[match.end() :]
-        following = rest.lstrip()[:1]
+        rest = _BEFORE_SEPARATOR_RE.sub("", child[match.end() :])
+        following = rest[:1]
         if following and following in _SEPARATORS:
             remainder = _LEADING_SEPARATORS_RE.sub("", rest)
             if _WORD_RE.search(remainder):

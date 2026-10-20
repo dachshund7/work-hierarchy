@@ -91,6 +91,55 @@ class FakeMetadata(dict):
         ("Suite: IV. Passepied", "Suite", 5, ("IV. Passepied", None)),
         # Arabic numerals, and numerals used when the position is unknown.
         ("Mass: 2. Gloria", "Mass", 2, ("Gloria", 2)),
+        (
+            "Symphony no. 9 in D minor, op. 125 “Choral”: "
+            "I. Allegro ma non troppo, un poco maestoso",
+            "Symphony no. 9 in D minor, op. 125 “Choral”",
+            1,
+            ("Allegro ma non troppo, un poco maestoso", 1),
+        ),
+        (
+            "Choral Fantasy in C minor, op. 80 “Choral Fantasy”: I. Adagio",
+            "Choral Fantasy in C minor, op. 80 “Choral Fantasy”",
+            1,
+            ("Adagio", 1),
+        ),
+        (
+            "Symphony no. 3 (Eroica): II. Marcia funebre",
+            "Symphony no. 3 (Eroica)",
+            2,
+            ("Marcia funebre", 2),
+        ),
+        (
+            'Kantate, BWV 214 "Tönet, ihr Pauken! Erschallet, Trompeten!": I. Coro '
+            '"Tönet, ihr Pauken! Erschallet, Trompeten!"',
+            'Kantate, BWV 214 "Tönet, ihr Pauken! Erschallet, Trompeten!"',
+            1,
+            ('Coro "Tönet, ihr Pauken! Erschallet, Trompeten!"', 1),
+        ),
+        (
+            'Kantate, BWV 89 "Was soll ich aus dir machen, Ephraim?": II. Recitativo (Alt)',
+            'Kantate, BWV 89 "Was soll ich aus dir machen, Ephraim?"',
+            2,
+            ("Recitativo (Alt)", 2),
+        ),
+        (
+            "Kantate, BWV 4 „Christ lag in Todesbanden“: I. Sinfonia",
+            "Kantate, BWV 4 „Christ lag in Todesbanden“",
+            1,
+            ("Sinfonia", 1),
+        ),
+        (
+            "Symphonie Nr. 9 »Aus der Neuen Welt«: I. Adagio",
+            "Symphonie Nr. 9 »Aus der Neuen Welt«",
+            1,
+            ("Adagio", 1),
+        ),
+        ("Concerto 「Spring」: I. Allegro", "Concerto 「Spring」", 1, ("Allegro", 1)),
+        # An opening bracket after the parent's title isn't the end of it.
+        ("Adelaide (Excerpts)", "Adelaide", None, ("Adelaide (Excerpts)", None)),
+        # A quote that isn't closing the parent's title is kept.
+        ("Tosca: “Vissi d'arte”", "Tosca", None, ("“Vissi d'arte”", None)),
         ("Mass: II. Gloria", "Mass", None, ("Gloria", 2)),
         # No prefix in common.
         ("Gute Nacht", "Winterreise, D. 911", 1, ("Gute Nacht", None)),
