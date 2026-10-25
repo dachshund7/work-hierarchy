@@ -2,28 +2,15 @@ import time
 import traceback
 import uuid
 import weakref
-from collections import ChainMap
 from functools import partial
-from typing import ClassVar
 
 from picard.album_requests import TaskType
-from picard.plugin3.api import OptionsPage, PageOptionConfigs, PluginApi, t_
+from picard.metadata import Metadata
+from picard.plugin3.api import PluginApi
 from picard.track import NonAlbumTrack
-from PyQt6 import QtWidgets
 from PyQt6.QtNetwork import QNetworkReply
 
-from .hierarchy import (
-    WORK_LEVEL_PARENT,
-    WORK_LEVEL_TOP,
-    WorkInfo,
-    apply_composer_tags,
-    apply_tags,
-    performances,
-    resolve,
-)
-
-SETTING_WORK_LEVEL = "work_level"
-SETTING_INHERIT_COMPOSERS = "inherit_composers"
+from .hierarchy import WorkInfo, apply_tags, performances, resolve
 
 #: How long looked-up works are reused before being requested again, so
 #: corrections made on MusicBrainz show up when an album is refreshed.
@@ -31,10 +18,10 @@ CACHE_SECONDS = 10 * 60
 
 
 class WorkStore:
-    """Looks up works on MusicBrainz, sharing results between tracks.
+    """Looks up works on MusicBrainz, sharing results between lookups.
 
-    Concurrent requests for the same work (every track of a symphony needs
-    its parent) are merged into one, and results are cached for a while.
+    Concurrent requests for the same work (albums of the same opera, say)
+    are merged into one, and results are cached for a while.
     """
 
     def __init__(self, cache_seconds=CACHE_SECONDS, clock=time.monotonic):
@@ -57,24 +44,39 @@ class WorkStore:
         return {work_id: work for work_id, (_, work) in self._works.items()}
 
     def watch(self, api):
-        """Start noticing lookups the web service drops; see _requests_changed."""
+        """Start looking up works, and noticing lookups the web service drops."""
         self._api = api
         api.web_service.pending_requests_changed.connect(self._requests_changed)
 
     def unwatch(self):
-        if self._api is not None:
-            self._api.web_service.pending_requests_changed.disconnect(self._requests_changed)
-            self._api = None
+        """Stop, failing the lookups still pending.
 
-    def request(self, api, work_id, callback):
+        Nothing would notice them dropped any more, so albums waiting for
+        them could wait forever.
+        """
+        api = self._api
+        if api is None:
+            return
+        api.web_service.pending_requests_changed.disconnect(self._requests_changed)
+        self._api = None
+        for work_id in list(self._pending):
+            self._notify(api, work_id, None)
+
+    def request(self, work_id, callback):
         """Look up a work, then call ``callback(work_id, work, stopped)``.
 
         ``work`` is the WorkInfo, or None if the lookup failed. ``stopped``
         is true if it failed because the user stopped network requests.
+        Returns False, and won't call ``callback``, if the request couldn't
+        be sent.
         """
         if work_id in self._pending:
             self._pending[work_id].append(callback)
-            return
+            return True
+        api = self._api
+        if api is None:
+            # The plugin was disabled.
+            return False
         self._pending[work_id] = [callback]
         try:
             api.mb_api.get(
@@ -85,9 +87,11 @@ class WorkStore:
                 important=False,
             )
         except Exception:
-            # Nothing will answer, so later tracks mustn't wait for it.
+            # Nothing will answer, so later lookups mustn't wait for it.
             del self._pending[work_id]
-            raise
+            api.logger.error("Could not request work %s: %s", work_id, traceback.format_exc())
+            return False
+        return True
 
     def _received(self, api, work_id, response, reply, error):
         work = None
@@ -113,7 +117,7 @@ class WorkStore:
         Picard drops some requests without calling their handlers: queued
         requests when the user stops network requests, and cancelled ones
         (a transfer timeout, say) at other times. Without this, the lookups
-        would stay pending, and every later track needing those works would
+        would stay pending, and every later album needing those works would
         wait for them forever. A lookup counts as a pending request until
         its handler is called, so if the web service has none while lookups
         are pending, they were dropped.
@@ -135,202 +139,147 @@ class WorkStore:
 
 _store = WorkStore()
 
-#: The ID of each track's current job, so a job can tell when the track has
-#: been reloaded. IDs rather than jobs, as a job holds its track.
-_current_jobs = weakref.WeakKeyDictionary()
 
+class AncestorLookup:
+    """Looks up the ancestors of performed works until every path is complete.
 
-class TrackJob:
-    """Tags one track, looking up ancestor works until every path is complete.
-
-    Tags are written straight away from the data in the release, then
-    rewritten as each level of ancestors arrives. For album tracks the job
-    holds a critical task on the album, so Picard waits for it before running
-    scripts and finishing the album.
+    A work only names its parent, so the climb goes a level at a time, and
+    through the store's cache as far as it can before requesting anything.
+    If it had to wait for lookups, ``finished()`` is called once the paths
+    are as complete as they can be, unless ``abandoned()`` is true by then,
+    or the user stopped network requests.
     """
 
-    def __init__(
-        self,
-        api,
-        track,
-        metadata,
-        performed,
-        work_level,
-        store,
-        recording_title=None,
-        inherit_composers=True,
-    ):
+    def __init__(self, api, store, performed, finished, abandoned):
         self.api = api
-        self.track = track
-        self.metadata = metadata
-        self.performed = performed
-        self.recording_title = recording_title
-        self.work_level = work_level
-        self.inherit_composers = inherit_composers
         self.store = store
-        self.segments = ()
+        self.performed = performed
+        self.finished = finished
+        self.abandoned = abandoned
+        #: The ancestors received, or found in the cache. Kept here as well,
+        #: as the cache can expire them during a long queue of lookups.
+        self.works = {}
         self.failed = set()
         self.waiting = set()
-        #: Works this job has received or used. The store's cache expires
-        #: works after a while, which a long queue of lookups can outlast.
-        self.known = {}
-        self.job_id = uuid.uuid4().hex
-        self.task_id = None
-        self.in_processor = False
-        self.stopped = False
-        self.finished = False
-
-    @property
-    def standalone(self):
-        return isinstance(self.track, NonAlbumTrack)
+        self.done = False
 
     def start(self):
-        """Run from the track metadata processor."""
-        _current_jobs[self.track] = self.job_id
-        self.in_processor = True
-        try:
-            self.run()
-        finally:
-            self.in_processor = False
+        """Request the ancestors that aren't known; return whether there are none."""
+        return self._advance_safely()
 
-    def run(self):
+    def _advance_safely(self):
         try:
-            done = self._advance()
+            self.done = self._advance()
         except Exception:
             self.api.logger.error("%s", traceback.format_exc())
-            done = True
-        if done:
-            self._finish_safely()
-
-    def _finish_safely(self):
-        try:
-            self._finish()
-        except Exception:
-            self.api.logger.error("%s", traceback.format_exc())
-
-    def _abandoned(self):
-        """Whether the track no longer needs this job.
-
-        True if the track was reloaded, its album was removed, stopped or
-        reloaded, or a standalone recording was removed.
-        """
-        if _current_jobs.get(self.track) != self.job_id:
-            return True
-        album = self.track.album
-        if album is None:
-            return True
-        if self.task_id is not None and self.task_id not in album._pending_tasks:
-            return True
-        return self.standalone and self.track not in album.tracks
+            # Better the levels known so far than an album that never loads.
+            self.done = True
+        return self.done
 
     def _advance(self):
-        """Tag the track with what is known; return whether that is all there is."""
-        if self._abandoned():
-            return True
-        works = ChainMap(self.known, self.store.works())
-        resolution = resolve(self.performed, works, self.failed)
-        for segment in resolution.segments:
-            for node in segment.path:
-                if node.id in works:
-                    self.known[node.id] = works[node.id]
-        self.segments = resolution.segments
-        # A standalone recording's tags are written once loading has
-        # finished, in _finish.
-        if self.in_processor or not self.standalone:
-            self._apply_tags(self.metadata)
-        if not resolution.unknown:
-            return True
-        if self.task_id is None and not self.standalone:
-            task_id = f"{self.api.plugin_id}_works_{uuid.uuid4().hex}"
-            # Added directly rather than with api.add_album_task(), which
-            # gives blocking tasks a 30 second timeout. Lookups queue behind
-            # the web service's rate limit, so a box set with many works can
-            # take longer, and an album finished early would miss tags in its
-            # scripts and files. Failed or stopped lookups still end the task.
-            self.track.album.add_task(
-                task_id,
-                TaskType.CRITICAL,
-                f"[{self.api.plugin_id}] Looking up parent works",
-                plugin_id=self.api.plugin_id,
-            )
-            self.task_id = task_id
-        self.waiting = set(resolution.unknown)
-        for work_id in sorted(resolution.unknown):
-            self.store.request(self.api, work_id, self._received)
-        return False
+        """Request the next ancestors; return whether there are none to wait for."""
+        cached = self.store.works()
+        while True:
+            unknown = resolve(self.performed, self.works, self.failed).unknown
+            if not unknown:
+                return True
+            found = unknown & cached.keys()
+            if found:
+                self.works.update((work_id, cached[work_id]) for work_id in found)
+                continue
+            for work_id in sorted(unknown):
+                if self.store.request(work_id, self._received):
+                    self.waiting.add(work_id)
+                else:
+                    self.failed.add(work_id)
+            if self.waiting:
+                return False
 
-    def _apply_tags(self, metadata):
-        apply_tags(metadata, self.segments, self.work_level, self.recording_title)
-        if self.inherit_composers:
-            apply_composer_tags(metadata, self.segments)
-
-    def _received(self, work_id, work, stopped=False):
-        if self.finished:
-            # Lookups still in flight when the job stopped.
+    def _received(self, work_id, work, stopped):
+        if self.done:
+            # A lookup still in flight when the climb ended.
             return
-        if stopped:
-            self.stopped = True
-            self._finish_safely()
+        if stopped or self.abandoned():
+            # Stopped by the user, Picard then aborts the albums still
+            # loading, rather than have them shown as loaded with tags
+            # missing. (Lookups Stop drops before they start are failed by
+            # WorkStore._requests_changed instead.)
+            self.done = True
             return
         if work is None:
             self.failed.add(work_id)
         else:
-            self.known[work_id] = work
+            self.works[work_id] = work
         self.waiting.discard(work_id)
-        if not self.waiting:
-            self.run()
+        if not self.waiting and self._advance_safely():
+            self.finished()
 
-    def _finish(self):
-        self.finished = True
-        if self.task_id is not None:
-            self._release_album()
-        elif self.standalone and not self.in_processor:
-            self._update_standalone_track()
 
-    def _release_album(self):
-        album = self.track.album
-        task_id, self.task_id = self.task_id, None
+#: The works looked up for each album, for its tracks.
+_album_works = weakref.WeakKeyDictionary()
+
+#: The latest lookup of each standalone recording, so earlier ones can tell
+#: it was reloaded. Tokens rather than lookups, as a lookup holds its track.
+_standalone_lookups = weakref.WeakKeyDictionary()
+
+
+def process_album(api, album, metadata, release_node):
+    """Look up the parent works of the whole release before its tracks load.
+
+    Picard creates an album's tracks, running the track processors, once
+    the album has no critical tasks left, so each track is tagged once, with
+    every level known, before later processors and the tagger scripts run.
+    """
+    performed = [
+        performance
+        for recording in _recordings(release_node)
+        for performance in performances(recording)
+    ]
+    task_id = f"{api.plugin_id}_works_{uuid.uuid4().hex}"
+    album_ref = weakref.ref(album)
+
+    def abandoned():
         # The album no longer has the task if it was removed, stopped or
-        # reloaded while the lookups were running. It is then not this job's
-        # to finish.
-        if album is None or task_id not in album._pending_tasks:
-            return
-        album.complete_task(task_id)
-        # When the user stops network requests, Picard then aborts the albums
-        # still loading, so they aren't shown as loaded with tags missing.
-        # While the track processors run, Picard finishes the album itself
-        # once they return.
-        if not self.stopped and not self.in_processor and not album.loaded:
-            album._finalize_loading(None)
+        # reloaded while the lookups were running.
+        current = album_ref()
+        return current is None or task_id not in current._pending_tasks
 
-    def _update_standalone_track(self):
-        """Tag a standalone recording whose lookups finished after it loaded.
+    def finished():
+        current = album_ref()
+        if current is not None:
+            current.complete_task(task_id)
+            # Picard only finishes loading an album when one of its own
+            # requests ends, so a plugin's task has to do it.
+            current._finalize_loading(None)
 
-        Picard finishes loading a standalone recording as soon as the track
-        processors return: it copies the metadata to the track's original
-        metadata, then runs the tagger scripts on the metadata. The tags are
-        written to the original metadata and those steps repeated, so the
-        scripts see them, and the files updated.
-        """
-        track = self.track
-        if not track.loaded or self._abandoned():
-            # Being reloaded, which runs a new job, or removed.
-            return
-        self._apply_tags(track.orig_metadata)
-        track.metadata.copy(track.orig_metadata)
-        track.run_scripts(track.metadata, strip_whitespace=True)
-        if track.files:
-            for file in track.files:
-                # This updates the track's row too.
-                track.update_file_metadata(file)
-        else:
-            track.update()
-        album = track.album
-        if album is not None:
-            album.update(update_tracks=False)
+    lookup = AncestorLookup(api, _store, performed, finished, abandoned)
+    _album_works[album] = lookup.works
+    if not lookup.start():
+        # Added directly rather than with api.add_album_task(), which gives
+        # blocking tasks a 30 second timeout. Lookups queue behind the web
+        # service's rate limit, so a box set with many works can take
+        # longer, and an album finished early would miss tags. Failed or
+        # stopped lookups still end the task.
+        album.add_task(
+            task_id,
+            TaskType.CRITICAL,
+            f"[{api.plugin_id}] Looking up parent works",
+            plugin_id=api.plugin_id,
+        )
+
+
+def _recordings(release_node):
+    """The recordings of a release's tracks, as Picard loads them."""
+    for medium in release_node.get("media", ()):
+        tracks = [medium.get("pregap"), *medium.get("tracks", ()), *medium.get("data-tracks", ())]
+        for track in tracks:
+            if track:
+                yield track["recording"]
 
 
 def process_track(api, track, metadata, track_node, release_node=None):
+    # A standalone recording loaded again mustn't be tagged by earlier lookups.
+    _standalone_lookups.pop(track, None)
     recording = track_node.get("recording", track_node)
     if "relations" not in recording:
         # "Use track relationships" is off: there is nothing to go on, so
@@ -338,98 +287,74 @@ def process_track(api, track, metadata, track_node, release_node=None):
         return
     metadata["~recording_work"] = metadata.getall("work")
     metadata["~recording_workid"] = metadata.getall("musicbrainz_workid")
-    TrackJob(
-        api,
-        track,
-        metadata,
-        performances(recording),
-        api.plugin_config[SETTING_WORK_LEVEL],
-        _store,
-        recording.get("title"),
-        api.plugin_config[SETTING_INHERIT_COMPOSERS],
-    ).start()
+    write_tags = partial(apply_tags, recording_title=recording.get("title"))
+    performed = performances(recording)
+    if isinstance(track, NonAlbumTrack):
+        _tag_standalone(api, track, metadata, performed, write_tags)
+    else:
+        # The album's lookups have finished by now (see process_album).
+        works = _album_works.get(track.album, {})
+        write_tags(metadata, resolve(performed, works).segments)
 
 
-class WorkHierarchyOptionsPage(OptionsPage):
-    # The interface text is translated from locale/<language>.toml. The
-    # tr() calls also give the English text, used when there is no
-    # translation; the title, marked with t_(), has no such fallback, so it
-    # relies on locale/en.toml (the tests check it is there).
-    NAME = "work_hierarchy"
-    TITLE = t_("options.title", "Work Hierarchy")
-    PARENT = "plugins"
-    # Registers the settings with the page, for Restore Defaults.
-    OPTIONS: ClassVar[PageOptionConfigs] = {
-        SETTING_WORK_LEVEL: {},
-        SETTING_INHERIT_COMPOSERS: {},
-    }
+def _tag_standalone(api, track, metadata, performed, write_tags):
+    """Tag a standalone recording with what is known, and again if its lookups find more."""
+    token = object()
+    _standalone_lookups[track] = token
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        tr = self.api.tr
-        layout = QtWidgets.QVBoxLayout(self)
-        box = QtWidgets.QGroupBox(tr("options.work_tag.title", "Work tag"), self)
-        box_layout = QtWidgets.QVBoxLayout(box)
-        self.top_level = QtWidgets.QRadioButton(
-            tr(
-                "options.work_tag.top_level",
-                "Top-level work; the movement tag names every level below it\n"
-                "(work: Die Zauberflöte, movement: Akt I: No. 1 Introduktion)",
-            ),
-            box,
+    def abandoned():
+        # Being reloaded, or reloaded since, or removed.
+        album = track.album
+        return (
+            _standalone_lookups.get(track) is not token
+            or not track.loaded
+            or album is None
+            or track not in album.tracks
         )
-        self.parent_level = QtWidgets.QRadioButton(
-            tr(
-                "options.work_tag.parent_level",
-                "Parent of the performed work; the movement tag names only that work\n"
-                "(work: Die Zauberflöte: Akt I, movement: No. 1 Introduktion)",
-            ),
-            box,
-        )
-        box_layout.addWidget(self.top_level)
-        box_layout.addWidget(self.parent_level)
-        layout.addWidget(box)
-        note = QtWidgets.QLabel(
-            tr(
-                "options.work_tag.note",
-                "The work_hierarchy tag always describes the complete hierarchy.",
-            ),
-            self,
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        composer_box = QtWidgets.QGroupBox(tr("options.composer_tags.title", "Composer tags"), self)
-        composer_layout = QtWidgets.QVBoxLayout(composer_box)
-        self.inherit_composers = QtWidgets.QCheckBox(
-            tr(
-                "options.composer_tags.inherit",
-                "When a performed work has no composer on MusicBrainz, use its\n"
-                "nearest parent work's composers",
-            ),
-            composer_box,
-        )
-        composer_layout.addWidget(self.inherit_composers)
-        layout.addWidget(composer_box)
-        layout.addStretch()
 
-    def load(self):
-        level = self.api.plugin_config[SETTING_WORK_LEVEL]
-        self.parent_level.setChecked(level == WORK_LEVEL_PARENT)
-        self.top_level.setChecked(level != WORK_LEVEL_PARENT)
-        self.inherit_composers.setChecked(self.api.plugin_config[SETTING_INHERIT_COMPOSERS])
+    def finished():
+        segments = resolve(performed, lookup.works).segments
+        # Nothing new if the lookups failed, so the track is left alone.
+        if segments != tagged:
+            _update_standalone_track(track, write_tags, segments)
 
-    def save(self):
-        self.api.plugin_config[SETTING_WORK_LEVEL] = (
-            WORK_LEVEL_PARENT if self.parent_level.isChecked() else WORK_LEVEL_TOP
-        )
-        self.api.plugin_config[SETTING_INHERIT_COMPOSERS] = self.inherit_composers.isChecked()
+    lookup = AncestorLookup(api, _store, performed, finished, abandoned)
+    lookup.start()
+    tagged = resolve(performed, lookup.works).segments
+    write_tags(metadata, tagged)
+
+
+def _update_standalone_track(track, write_tags, segments):
+    """Tag a standalone recording whose lookups finished after it loaded.
+
+    Picard finishes loading a standalone recording as soon as the track
+    processors return: it copies the metadata to the track's original
+    metadata, then runs the tagger scripts on the metadata. The tags are
+    written to the original metadata and those steps repeated, so the
+    scripts see them, and the files updated. Tags changed in Picard since
+    the track loaded, those its scripts didn't give it, are kept.
+    """
+    loaded = Metadata(track.orig_metadata)
+    track.run_scripts(loaded, strip_whitespace=True)
+    changes = track.metadata.diff(loaded)
+    write_tags(track.orig_metadata, segments)
+    track.metadata.copy(track.orig_metadata)
+    track.run_scripts(track.metadata, strip_whitespace=True)
+    track.metadata.update(changes)
+    if track.files:
+        for file in track.files:
+            # This updates the track's row too.
+            track.update_file_metadata(file)
+    else:
+        track.update()
+    album = track.album
+    if album is not None:
+        album.update(update_tracks=False)
 
 
 def enable(api: PluginApi) -> None:
-    api.plugin_config.register_option(SETTING_WORK_LEVEL, WORK_LEVEL_TOP)
-    api.plugin_config.register_option(SETTING_INHERIT_COMPOSERS, True)
+    api.register_album_metadata_processor(process_album)
     api.register_track_metadata_processor(process_track)
-    api.register_options_page(WorkHierarchyOptionsPage)
     _store.watch(api)
 
 

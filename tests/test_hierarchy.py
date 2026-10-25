@@ -1,5 +1,6 @@
 """Work hierarchy logic, without Picard."""
 
+import dataclasses
 import json
 
 import pytest
@@ -8,11 +9,12 @@ from support import WORKS, load_fixture, load_work
 from hierarchy import (
     JSON_TAG,
     MAX_DEPTH,
-    WORK_LEVEL_PARENT,
     Artist,
     Performance,
+    StandardTags,
     WorkInfo,
     WorkLink,
+    _catalogue_numbers,
     _numeral_value,
     apply_composer_tags,
     apply_tags,
@@ -149,14 +151,53 @@ class FakeMetadata(dict):
         ("Akt I", "Akt I", 1, ("Akt I", None)),
         # Not a Roman numeral.
         ("Op. 10: IIII. Etude", "Op. 10", 4, ("IIII. Etude", None)),
+        # A letter, or a catalogue such as Schubert's, rather than 100 or 500.
+        ("Mass in B minor: C. Credo", "Mass in B minor", None, ("C. Credo", None)),
+        ("Impromptus: D. 899", "Impromptus", None, ("D. 899", None)),
+        # A period or comma that is the parent's own, followed by its next
+        # word, isn't the end of the prefix, even when the title goes on
+        # with words the parent doesn't have.
+        (
+            "Piano Sonata no. 14 “Quasi una fantasia”: I. Adagio sostenuto",
+            "Piano Sonata no. 14 in C-sharp minor, op. 27 no. 2 “Moonlight”",
+            1,
+            ("Piano Sonata no. 14 “Quasi una fantasia”: I. Adagio sostenuto", None),
+        ),
+        (
+            "Symphony no. 3 (Eroica): II. Marcia funebre",
+            "Symphony no. 3",
+            2,
+            ("Symphony no. 3 (Eroica): II. Marcia funebre", None),
+        ),
+        (
+            "Concerto in D, RV 93 (arr. guitar): I. Allegro",
+            "Concerto in D, RV 93",
+            1,
+            ("Concerto in D, RV 93 (arr. guitar): I. Allegro", None),
+        ),
+        ("Op. 10 No. 3: Etude", "Op. 10", 3, ("Op. 10 No. 3: Etude", None)),
+        # A period after the parent's last word still is.
+        ("Die Zauberflöte. Ouvertüre", "Die Zauberflöte, K. 620", 1, ("Ouvertüre", None)),
     ],
 )
 def test_display_name(title, parent, position, expected):
-    assert display_name(title, parent, position) == expected
+    assert display_name(title, parent, position)[:2] == expected
 
 
 def test_display_name_of_top_level_work_is_its_title():
-    assert display_name("Die Zauberflöte, K. 620", None, None) == ("Die Zauberflöte, K. 620", None)
+    assert display_name("Die Zauberflöte, K. 620", None, None) == (
+        "Die Zauberflöte, K. 620",
+        None,
+        None,
+    )
+
+
+def test_display_name_gives_the_numeral_removed():
+    title = "Requiem, op. 89: I. oddíl: III. Sequentia"
+    assert display_name(title, "Requiem, op. 89: I. oddíl", 3) == ("Sequentia", 3, "III")
+    assert display_name("Mass: 2. Gloria", "Mass", 2) == ("Gloria", 2, "2")
+    # Kept in the name, so not removed.
+    assert display_name("Suite: IV. Passepied", "Suite", 5) == ("IV. Passepied", None, None)
 
 
 @pytest.mark.parametrize(
@@ -167,7 +208,7 @@ def test_numeral_value(numeral, value):
     assert _numeral_value(numeral) == value
 
 
-@pytest.mark.parametrize("numeral", ["IIII", "IC", "VX", "MMMM"])
+@pytest.mark.parametrize("numeral", ["IIII", "IC", "VX", "MMMM", "C", "D", "L", "M"])
 def test_invalid_roman_numerals(numeral):
     assert _numeral_value(numeral) is None
 
@@ -268,7 +309,7 @@ def test_work_and_its_part_both_linked():
 
     resolution = resolve(performed(whole, part), {"w": whole})
 
-    assert [s.work.id for s in resolution.segments] == ["p"]
+    assert [s.performed.id for s in resolution.segments] == ["p"]
 
 
 def test_duplicate_performances_are_merged():
@@ -334,13 +375,6 @@ def test_standard_tags_top_level():
     assert (tags.movementnumber, tags.movementtotal) == (6, 31)
 
 
-def test_standard_tags_parent_level():
-    tags = standard_tags(zauberfloete_segments(1, 4), WORK_LEVEL_PARENT)
-    assert tags.work == ("Die Zauberflöte, K. 620: Akt I",)
-    assert tags.movement == "No. 3 Arie „Dies Bildnis ist bezaubernd schön“ (Tamino)"
-    assert (tags.movementnumber, tags.movementtotal) == (6, 31)
-
-
 def test_standard_tags_shared_levels_named_once():
     tags = standard_tags(zauberfloete_segments(2, 20))
     assert tags.movement == (
@@ -373,6 +407,230 @@ def test_standard_tags_for_a_medley_of_songs():
     tags = standard_tags(resolve(songs, {}).segments)
     assert tags.work == ("Song A", "Song B")
     assert tags.movement is None
+
+
+def test_standard_tags_number_the_levels_above_the_movement():
+    requiem = work("r", "Requiem, op. 89")
+    part = work("1", "Requiem, op. 89: I. oddíl", parents=[link("r", requiem.title, 1)])
+    sequence = work("3", f"{part.title}: III. Sequentia", parents=[link("1", part.title, 3)])
+    quid = work("q", f"{sequence.title}: Quid sum miser", parents=[link("3", sequence.title, 3)])
+    works = {w.id: w for w in (requiem, part, sequence)}
+
+    tags = standard_tags(resolve(performed(quid), works).segments)
+
+    assert tags.work == ("Requiem, op. 89",)
+    # The movement's own number is the movement number.
+    assert (tags.movement, tags.movementnumber) == ("I. oddíl: III. Sequentia: Quid sum miser", 3)
+
+
+# A part with a catalogue number of its own is the work
+
+WTC = work("wtc", "The Well-Tempered Clavier")
+BOOK_I = work("book1", "The Well-Tempered Clavier, Book I", parents=[link("wtc", WTC.title, 1)])
+BWV_846 = work(
+    "bwv846",
+    f"{BOOK_I.title}: Prelude and Fugue no. 1 in C major, BWV 846",
+    parents=[link("book1", BOOK_I.title, 1)],
+    parts=[link("p846", "…: Prelude", 1), link("f846", "…: Fugue", 2)],
+)
+PRELUDE_846 = work("p846", f"{BWV_846.title}: Prelude", parents=[link("bwv846", BWV_846.title, 1)])
+FUGUE_846 = work("f846", f"{BWV_846.title}: Fugue", parents=[link("bwv846", BWV_846.title, 2)])
+BWV_847 = work(
+    "bwv847",
+    f"{BOOK_I.title}: Prelude and Fugue no. 2 in C minor, BWV 847",
+    parents=[link("book1", BOOK_I.title, 2)],
+)
+PRELUDE_847 = work("p847", f"{BWV_847.title}: Prelude", parents=[link("bwv847", BWV_847.title, 1)])
+WTC_WORKS = {w.id: w for w in (WTC, BOOK_I, BWV_846, BWV_847)}
+
+
+def wtc_tags(*works):
+    return standard_tags(resolve(performed(*works), WTC_WORKS).segments)
+
+
+def test_a_part_with_its_own_catalogue_number_is_the_work():
+    resolution = resolve(performed(PRELUDE_846), WTC_WORKS)
+    assert [s.work_index for s in resolution.segments] == [2]
+    tags = standard_tags(resolution.segments)
+    assert tags.work == (BWV_846.title,)
+    assert (tags.movement, tags.movementnumber, tags.movementtotal) == ("Prelude", 1, 2)
+    # Its movements together
+    assert wtc_tags(FUGUE_846, PRELUDE_846).movement == "Prelude / Fugue"
+
+
+def test_a_whole_part_with_its_own_catalogue_number_is_not_a_movement():
+    assert wtc_tags(BWV_846) == StandardTags((BWV_846.title,), None, None, None)
+    # Unless it has no parts, like a movement with a number of its own
+    without_parts = dataclasses.replace(BWV_846, parts=())
+    tags = wtc_tags(without_parts)
+    assert tags.work == (WTC.title,)
+    assert tags.movement == "Book I: Prelude and Fugue no. 1 in C major, BWV 846"
+
+
+def test_movements_of_two_parts_with_their_own_numbers_are_in_the_work_above():
+    tags = wtc_tags(FUGUE_846, PRELUDE_847)
+    assert tags.work == (WTC.title,)
+    assert tags.movement == (
+        "Book I: Prelude and Fugue no. 1 in C major, BWV 846: Fugue"
+        " / Prelude and Fugue no. 2 in C minor, BWV 847: Prelude"
+    )
+
+
+def chain(*levels):
+    """The performed work, last of the levels, and the works above it.
+
+    Each level is a work's ID, title and position in the one before.
+    """
+    works = []
+    for work_id, title, position in levels:
+        parents = [link(works[-1].id, works[-1].title, position)] if works else []
+        works.append(work(work_id, title, parents=parents))
+    return works[-1], {w.id: w for w in works[:-1]}
+
+
+def test_parts_of_sets_with_their_own_numbers_are_works():
+    giga, works = chain(
+        ("op2", "12 sonate da camera, op. 2", None),
+        ("op2no4", "Sonata da camera a trè in E minor, op. 2 no. 4", 4),
+        ("g", "Sonata da camera a trè in E minor, op. 2 no. 4: Giga", 3),
+    )
+    tags = standard_tags(resolve(performed(giga), works).segments)
+    assert (tags.work, tags.movement) == (
+        ("Sonata da camera a trè in E minor, op. 2 no. 4",),
+        "Giga",
+    )
+
+    suite = "Water Music Suite no. 1 in F major, HWV 348"
+    andante, works = chain(
+        ("hwv348-350", "Water Music, HWV 348–350", None),
+        ("hwv348", suite, 1),
+        ("aaa", f"{suite}: III. Allegro - Andante - Allegro", 3),
+        ("an", f"{suite}: III. Allegro - Andante - Allegro: Andante", 2),
+    )
+    tags = standard_tags(resolve(performed(andante), works).segments)
+    assert tags.work == (suite,)
+    assert tags.movement == "III. Allegro - Andante - Allegro: Andante"
+
+
+def test_numbers_that_movements_repeat_do_not_make_them_works():
+    variation, works = chain(
+        ("k359", "12 Variations, K. 374a/359", None),
+        ("v1", "Variations in G major, K359: Variation I", 2),
+    )
+    assert standard_tags(resolve(performed(variation), works).segments).work == (
+        "12 Variations, K. 374a/359",
+    )
+    allemande, works = chain(
+        ("bwv813", "Französische Suite Nr. 2 c-Moll, BWV 813", None),
+        ("a", "Französische Suite Nr. 2 c-Moll, BWV 813: I. Allemande", 1),
+    )
+    assert standard_tags(resolve(performed(allemande), works).segments).work == (
+        "Französische Suite Nr. 2 c-Moll, BWV 813",
+    )
+    # Nor do acts, which have no catalogue numbers
+    tags = standard_tags(zauberfloete_segments(1, 4))
+    assert tags.work == ("Die Zauberflöte, K. 620",)
+
+
+@pytest.mark.parametrize(
+    ("name", "numbers"),
+    [
+        ("Prelude and Fugue no. 1 in C major, BWV 846", ["bwv 846"]),
+        ("Sonata da camera a trè in E minor, op. 2 no. 4", ["op 2 no 4"]),
+        ("12 sonate da camera, op. 2", ["op 2"]),
+        ("Fantasia in A major, TWV 40:18", ["twv 40:18"]),
+        ("Sonata in E-flat major, Hob. XVI:52", ["hob xvi:52"]),
+        ("Piano Sonata no. 11 in A major, K. 331", ["k 331"]),
+        ("4 Impromptus, op. 90, D. 899", ["op 90", "d 899"]),
+        # The name of the movement after the colon isn't a number in the set
+        ("Impromptu in C minor, op. 90, D. 899: No. 1. Allegro", ["op 90", "d 899"]),
+        ('Cantata, BuxWV 75a "Membra Jesu Nostri: Ad Pedes"', ["buxwv 75a"]),
+        ("Sonata, op.2", ["op 2"]),
+        ("Bachianas Brasileiras nº 5, W389", ["w 389"]),
+        ("Suite (BWV 1007)", ["bwv 1007"]),
+        ("Book I", []),
+        ("Act II", []),
+        ("Atto IV", []),
+        ("No. 4 in E minor", []),
+        ("Allegro - Andante - Allegro da capo", []),
+        ("Suite in D major", []),
+        ("Opus Dei", []),
+        ("Sonata, op. posth.", []),
+    ],
+)
+def test_catalogue_numbers(name, numbers):
+    assert _catalogue_numbers(name) == numbers
+
+
+# Parts of works named in recordings' titles
+
+FIREWORKS = work("hwv351", "Music for the Royal Fireworks, HWV 351")
+OUVERTURE = work(
+    "i", f"{FIREWORKS.title}: I. Ouverture", parents=[link("hwv351", FIREWORKS.title, 1)]
+)
+
+
+def fireworks_movement(title, attributes=("partial",)):
+    metadata = FakeMetadata()
+    segments = resolve(performed(OUVERTURE, attributes=attributes), {"hwv351": FIREWORKS}).segments
+    apply_tags(metadata, segments, title)
+    return metadata["movement"], json.loads(metadata[JSON_TAG])["segments"][0]["excerpt"]
+
+
+@pytest.mark.parametrize(
+    ("title", "excerpt"),
+    [
+        ("Music for the Royal Fireworks, HWV 351: Ia. Overture – Adagio", "Ia. Overture – Adagio"),
+        ("Music for the Royal Fireworks: Adagio", "Adagio"),
+        # A number like the movement's is left out, as from its name.
+        (
+            "Music for the Royal Fireworks, HWV 351: I. Ouverture (Beginning)",
+            "Ouverture (Beginning)",
+        ),
+        # Titled in another language
+        ("Feuerwerksmusik: Ouvertüre (Teil 1)", "Ouvertüre (Teil 1)"),
+        ("Feuerwerksmusik - Ouvertüre (Teil 1)", "Ouvertüre (Teil 1)"),
+    ],
+)
+def test_part_of_a_movement_is_named_after_the_recording(title, excerpt):
+    assert fireworks_movement(title) == (excerpt, excerpt)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Music for the Royal Fireworks, HWV 351: I. Ouverture",
+        "Ouverture",
+        "Music for the Royal Fireworks, HWV 351",
+        "Music for the Royal Fireworks: ",
+    ],
+)
+def test_titles_naming_no_part_of_the_movement(title):
+    assert fireworks_movement(title) == ("Ouverture", None)
+
+
+def test_whole_movements_are_named_after_the_work():
+    title = "Music for the Royal Fireworks, HWV 351: Ia. Overture – Adagio"
+    assert fireworks_movement(title, attributes=("live",)) == ("Ouverture", None)
+
+
+def test_part_of_a_number_keeps_its_act():
+    lakme = work("lakme", "Lakmé")
+    act = work("act1", "Lakmé: Acte I", parents=[link("lakme", "Lakmé", 1)])
+    air = work(
+        "air",
+        "Lakmé: Acte I. Air « Prendre le dessin d’un bijou »",
+        parents=[link("act1", act.title, 8)],
+    )
+    segments = resolve(performed(air, attributes=["partial"]), {"lakme": lakme, "act1": act})
+    metadata = FakeMetadata()
+
+    apply_tags(
+        metadata, segments.segments, "Lakmé : Acte I. Air « Prendre le dessin d’un bijou » (Gerald)"
+    )
+
+    assert metadata["movement"] == "Acte I: Air « Prendre le dessin d’un bijou » (Gerald)"
+    assert metadata["movementnumber"] == "8"
 
 
 # Writing tags
@@ -419,7 +677,7 @@ def test_json_format():
 
     assert document["version"] == 1
     [segment] = document["segments"]
-    assert segment["attributes"] == []
+    assert (segment["work_index"], segment["attributes"], segment["excerpt"]) == (0, [], None)
     opera, act, number = segment["path"]
     assert opera == {
         "id": "e208c5f5-5d37-3dfc-ac0b-999f207c9e46",
@@ -427,6 +685,8 @@ def test_json_format():
         "name": "Die Zauberflöte, K. 620",
         "type": "Opera",
         "position": None,
+        "number": None,
+        "numeral": None,
         "part_total": 3,
         "part_attributes": [],
         "collections": [],
@@ -437,6 +697,25 @@ def test_json_format():
     assert (act["name"], act["position"], act["part_total"]) == ("Akt I", 2, 31)
     assert act["part_attributes"] == ["act"]
     assert (number["position"], number["part_total"]) == (1, 0)
+    # "No. 1" is part of the name, not a numeral removed from it.
+    assert (number["number"], number["numeral"]) == (1, None)
+
+
+def test_json_gives_the_numerals_removed():
+    segments = resolve(performances(recording("bach_keyboard_suites", 1, 4)), ALL_WORKS).segments
+    movements = [json.loads(to_json(segments))["segments"][i]["path"][-1] for i in (0, 1)]
+    assert [(m["name"], m["number"], m["numeral"]) for m in movements] == [
+        ("Passepied I", 5, "V"),
+        ("Passepied II", 6, "VI"),
+    ]
+
+
+def test_json_number_without_position_is_read_from_the_title():
+    mass = work("m", "Mass", parts=[link("g", "Mass: II. Gloria")])
+    gloria = work("g", "Mass: II. Gloria", parents=[link("m", "Mass")])
+    [segment] = resolve(performed(gloria), {"m": mass}).segments
+    node = segment.to_json()["path"][-1]
+    assert (node["position"], node["number"], node["numeral"]) == (None, 2, "II")
 
 
 def test_json_includes_collections():
@@ -580,6 +859,14 @@ def test_inherited_composers_are_unique_by_id():
     segments = resolve(performed(first, second), works).segments
 
     assert [artist.id for artist in inherited_composers(segments)] == [MOZART.id]
+
+
+def test_apply_tags_adds_inherited_composers():
+    number = without_composers(recording("zauberfloete", 1, 2))
+    metadata = FakeMetadata()
+    apply_tags(metadata, resolve(performances(number), ALL_WORKS).segments)
+    assert metadata["composer"] == [MOZART.name]
+    assert metadata["musicbrainz_composerid"] == [MOZART.id]
 
 
 def test_apply_composer_tags_leaves_tags_alone_when_nothing_is_inherited():

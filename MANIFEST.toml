@@ -2,15 +2,13 @@ uuid = "4ad2bc1a-9be5-4b4e-96bc-530fa9fca038"
 name = "Work Hierarchy"
 authors = ["John Hamilton"]
 description = "Tags classical works with their full work hierarchy, including tracks that contain several movements"
-version = "0.2.0"
+version = "0.3.0"
 api = ["3.0"]
 license = "GPL-2.0-or-later"
 license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
 categories = ["metadata"]
 homepage = "https://github.com/dachshund7/work-hierarchy"
 report_bugs_to = "https://github.com/dachshund7/work-hierarchy/issues"
-# The interface text is in locale/en.toml; translations go alongside it.
-source_locale = "en"
 long_description = """
 Sets work and movement tags from MusicBrainz work relationships, following the
 work hierarchy as many levels as it goes (for example opera, act, number) and

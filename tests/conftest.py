@@ -89,7 +89,7 @@ class PicardEnv:
         self.plugin = plugin
         #: The plugin as Picard loaded it (picard.plugins.work_hierarchy_<uuid>).
         self.module = plugin._module
-        self.plugin_config = PluginApi._instances[plugin.module_name].plugin_config
+        self.api = PluginApi._instances[plugin.module_name]
 
 
 @pytest.fixture

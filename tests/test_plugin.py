@@ -155,26 +155,35 @@ def test_opera_three_levels(picard_env):
     )
 
 
-def test_partial_performance_is_recorded(picard_env):
+def test_pregap_and_data_tracks_are_looked_up(picard_env):
+    release = load_fixture("zauberfloete")
+    first, second = release["media"]
+    # Only these two tracks are left, so only they need the acts and opera.
+    first["pregap"] = first["tracks"][1]
+    second["data-tracks"] = [second["tracks"][0]]
+    for medium in release["media"]:
+        medium["tracks"], medium["track-count"] = [], 0
+    album = start_album_load(release)
+    picard_env.web.serve()
+
+    assert album.loaded
+    assert [t.metadata["work"] for t in album.tracks] == ["Die Zauberflöte, K. 620"] * 2
+    assert sorted(picard_env.web.requested) == sorted([ZAUBERFLOETE, AKT_I, AKT_II])
+
+
+def test_part_of_a_number_is_named_after_its_recording(picard_env):
     web = picard_env.web
     album = start_album_load(load_fixture("zauberfloete"))
     web.serve()
 
-    segments = json.loads(track(album, 1, 11).metadata["work_hierarchy"])["segments"]
-    assert [segment["attributes"] for segment in segments] == [["partial"]]
-
-
-def test_parent_work_level_setting(picard_env):
-    web = picard_env.web
-    picard_env.plugin_config["work_level"] = "parent"
-    album = start_album_load(load_fixture("zauberfloete"))
-    web.serve()
-
-    t = track(album, 1, 2)
-    assert t.metadata["work"] == "Die Zauberflöte, K. 620: Akt I"
-    assert t.metadata["movement"] == "No. 1 Introduktion „Zu Hilfe! Zu Hilfe!” (Tamino, Damen)"
-    # The JSON is the same whichever level the work tag uses.
-    assert len(json.loads(t.metadata["work_hierarchy"])["segments"][0]["path"]) == 3
+    # The recording, "Die Zauberflöte: Akt I. „O ew’ge Nacht“ (Tamino,
+    # Priester)", is of only part of a long number.
+    t = track(album, 1, 11)
+    [segment] = json.loads(t.metadata["work_hierarchy"])["segments"]
+    assert segment["attributes"] == ["partial"]
+    assert segment["excerpt"] == "„O ew’ge Nacht“ (Tamino, Priester)"
+    assert t.metadata["movement"] == "Akt I: „O ew’ge Nacht“ (Tamino, Priester)"
+    assert segment["path"][-1]["name"].startswith("„Zurück!” … „Zurück?”")
 
 
 MOZART_ID = "b972f589-fb0e-474e-b64a-803b0364fa75"
@@ -205,36 +214,35 @@ def test_composer_is_inherited_from_the_parent_work(picard_env):
     assert track(album, 1, 3).metadata.getall("musicbrainz_composerid") == [MOZART_ID]
 
 
-def test_composer_inheritance_keeps_later_processors_changes(picard_env):
-    def add_arranger(track, metadata, track_node, release_node=None):
+def test_later_processors_see_the_complete_tags(picard_env):
+    seen = {}
+
+    def later_processor(track, metadata, track_node, release_node=None):
+        if (metadata["discnumber"], metadata["tracknumber"]) == ("1", "2"):
+            seen.update({name: metadata.getall(name) for name in ("work", "movement", "composer")})
         metadata.add("composer", "Arranger")
         metadata.add("musicbrainz_composerid", "arranger-id")
 
     # Lower priority: runs after the plugin's processor.
-    track_metadata_processors.register(add_arranger.__module__, add_arranger, -10)
+    track_metadata_processors.register(later_processor.__module__, later_processor, -10)
     try:
         album = start_album_load(zauberfloete_with_unlinked_composer())
         picard_env.web.serve()
     finally:
         track_metadata_processors.functions.unregister(
-            add_arranger.__module__, lambda function: function is add_arranger
+            later_processor.__module__, lambda function: function is later_processor
         )
 
-    assert tags(track(album, 1, 2), "composer", "musicbrainz_composerid") == {
-        "composer": ["Arranger", "Wolfgang Amadeus Mozart"],
-        "musicbrainz_composerid": ["arranger-id", MOZART_ID],
+    assert seen == {
+        "work": ["Die Zauberflöte, K. 620"],
+        "movement": ["Akt I: No. 1 Introduktion „Zu Hilfe! Zu Hilfe!” (Tamino, Damen)"],
+        "composer": ["Wolfgang Amadeus Mozart"],
     }
-
-
-def test_composer_inheritance_can_be_turned_off(picard_env):
-    web = picard_env.web
-    picard_env.plugin_config["inherit_composers"] = False
-    album = start_album_load(zauberfloete_with_unlinked_composer())
-    web.serve()
-
-    t = track(album, 1, 2)
-    assert "composer" not in t.metadata
-    assert "musicbrainz_composerid" not in t.metadata
+    # What they change stays.
+    assert tags(track(album, 1, 2), "composer", "musicbrainz_composerid") == {
+        "composer": ["Wolfgang Amadeus Mozart", "Arranger"],
+        "musicbrainz_composerid": [MOZART_ID, "arranger-id"],
+    }
 
 
 def test_tagger_scripts_see_the_new_tags(picard_env):
@@ -335,14 +343,14 @@ def test_removed_album_that_is_gone(picard_env, caplog):
     assert plugin_errors(caplog) == []
 
 
-def test_request_that_fails_to_send_is_sent_again(picard_env, monkeypatch):
+def test_request_that_fails_to_send_still_finishes_the_album(picard_env, monkeypatch):
     web = picard_env.web
     get_url = web.get_url
     failed = []
 
     def get_url_failing_once(url, handler, **kwargs):
         if not failed:
-            failed.append(url)
+            failed.append(url.path().split("/")[-1])
             raise RuntimeError("broken")
         return get_url(url, handler, **kwargs)
 
@@ -350,16 +358,26 @@ def test_request_that_fails_to_send_is_sent_again(picard_env, monkeypatch):
     album = start_album_load(load_fixture("zauberfloete"))
     web.serve()
 
-    # The other tracks needing that work looked it up again.
-    assert failed
+    assert failed == [AKT_I]
     assert album.loaded
     assert not album.has_critical_tasks()
+    # The other works were still looked up.
+    assert sorted(web.requested) == sorted([AKT_II, ZAUBERFLOETE])
+    assert track(album, 1, 2).metadata["work"] == "Die Zauberflöte, K. 620: Akt I"
+    assert track(album, 2, 1).metadata["work"] == "Die Zauberflöte, K. 620"
+
+    # It isn't left pending, so the next album looks it up.
+    web.requested.clear()
+    start_album_load(load_fixture("zauberfloete"))
+    assert web.requested == [AKT_I]
 
 
 def test_lookups_outlasting_the_cache_are_not_repeated(picard_env, monkeypatch):
     web, module = picard_env.web, picard_env.module
     now = [0.0]
-    monkeypatch.setattr(module, "_store", module.WorkStore(clock=lambda: now[0]))
+    store = module.WorkStore(clock=lambda: now[0])
+    store.watch(picard_env.api)
+    monkeypatch.setattr(module, "_store", store)
     album = start_album_load(zauberfloete_by_acts())
 
     # The acts arrive, then the opera after the cache has expired them,
@@ -515,6 +533,94 @@ def test_standalone_recording_runs_scripts_on_the_new_tags(picard_env):
     assert t.orig_metadata["work"] == "Die Zauberflöte, K. 620"
     [file_metadata] = file.copy_metadata.call_args.args
     assert file_metadata["work"] == "DIE ZAUBERFLÖTE, K. 620"
+
+
+def test_standalone_recording_is_left_alone_when_lookups_find_nothing(picard_env):
+    recording = load_fixture("zauberfloete")["media"][0]["tracks"][1]["recording"]
+    t, file = load_standalone(picard_env, recording)
+    t.metadata["comment"] = "Edited in Picard"
+
+    picard_env.web.serve(fail=frozenset([AKT_I]))
+
+    assert t.metadata["work"] == "Die Zauberflöte, K. 620: Akt I"
+    assert t.metadata["comment"] == "Edited in Picard"
+    file.copy_metadata.assert_not_called()
+
+
+def test_stopped_standalone_recording_is_left_alone(picard_env):
+    web = picard_env.web
+    recording = load_fixture("zauberfloete")["media"][0]["tracks"][1]["recording"]
+    t, file = load_standalone(picard_env, recording)
+    t.metadata["comment"] = "Edited in Picard"
+
+    # What Picard's Stop does: the handlers of requests in progress are
+    # called with a cancellation error, then pending requests are reported
+    # changed.
+    in_progress, web.queue = web.queue, []
+    for _, handler in in_progress:
+        handler(b"", MagicMock(), QtNetwork.QNetworkReply.NetworkError.OperationCanceledError)
+    web.pending_requests_changed.emit()
+
+    assert t.metadata["comment"] == "Edited in Picard"
+    file.copy_metadata.assert_not_called()
+
+
+def test_standalone_recording_keeps_changes_made_while_looking_up(picard_env):
+    recording = load_fixture("zauberfloete")["media"][0]["tracks"][1]["recording"]
+    t, file = load_standalone(picard_env, recording)
+    t.metadata["comment"] = "Edited in Picard"
+    t.metadata.delete("title")
+
+    picard_env.web.serve()
+
+    assert t.metadata["work"] == "Die Zauberflöte, K. 620"
+    assert t.metadata["comment"] == "Edited in Picard"
+    assert "title" in t.metadata.deleted_tags
+    [file_metadata] = file.copy_metadata.call_args.args
+    assert file_metadata["comment"] == "Edited in Picard"
+
+
+def test_stopped_standalone_recording_keeps_the_levels_found(picard_env):
+    web = picard_env.web
+    recording = load_fixture("zauberfloete")["media"][0]["tracks"][1]["recording"]
+    t, _ = load_standalone(picard_env, recording)
+    # The act arrives, so the opera is looked up next.
+    [(act, handler)], web.queue = web.queue, []
+    handler(load_work(act), MagicMock(), None)
+    assert [work_id for work_id, _ in web.queue] == [ZAUBERFLOETE]
+    t.metadata["comment"] = "Edited in Picard"
+
+    # What Picard's Stop does with a request that hasn't started: it's
+    # dropped without calling its handler.
+    web.queue.clear()
+    web.pending_requests_changed.emit()
+
+    # The opera is known from the act's own relationships.
+    assert t.metadata["work"] == "Die Zauberflöte, K. 620"
+    assert t.metadata["movementtotal"] == "31"
+    assert t.metadata["comment"] == "Edited in Picard"
+
+
+def test_standalone_recording_refreshed_without_relationships_is_left_alone(picard_env):
+    recording = load_fixture("zauberfloete")["media"][0]["tracks"][1]["recording"]
+    t, _ = load_standalone(picard_env, recording)
+
+    # Refreshed meanwhile, with "Use track relationships" turned off.
+    t.load()
+    t._parse_recording({key: value for key, value in recording.items() if key != "relations"})
+    picard_env.web.serve()
+
+    assert "work_hierarchy" not in t.metadata
+
+
+def test_disabling_the_plugin_finishes_loading_albums(picard_env):
+    album = start_album_load(load_fixture("zauberfloete"))
+    assert album.has_critical_tasks()
+
+    picard_env.module.disable()
+
+    assert album.loaded
+    assert not album.has_critical_tasks()
 
 
 def test_refreshed_standalone_recording_keeps_its_new_tags(picard_env):

@@ -22,7 +22,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -45,19 +45,20 @@ JSON_TAG = "work_hierarchy"
 
 MOVEMENT_TAGS = ("movement", "movementnumber", "movementtotal", "showmovement")
 
-WORK_LEVEL_TOP = "top"
-WORK_LEVEL_PARENT = "parent"
-
 #: Attribute of the "parts" relationship that marks a grouping of separate
 #: works (e.g. "6 Partitas, BWV 825-830") rather than a work and its parts.
 COLLECTION_ATTRIBUTE = "part of collection"
+
+#: Attribute of the "performance" relationship of a recording that contains
+#: only part of the work, such as one of the tracks a movement is split into.
+PARTIAL_ATTRIBUTE = "partial"
 
 #: Guard against runaway climbs through bad data.
 MAX_DEPTH = 12
 
 _WORD_RE = re.compile(r"\w+")
 _SEPARATORS = ":.,;/|-–—"
-_LEADING_SEPARATORS_RE = re.compile(r"^[\s:.,;/|\-–—]+")
+_LEADING_SEPARATORS_RE = re.compile(rf"^[\s{re.escape(_SEPARATORS)}]+")
 #: What can come between a parent's last word and the separator: anything
 #: but words and separators, such as the closing quotes, brackets and "!"
 #: in "Symphony no. 9, op. 125 “Choral”: I. Allegro", 'Kantate, BWV 214
@@ -69,6 +70,19 @@ _TITLE_MOVEMENT_RE = re.compile(r"^(?P<work>.+):\s+(?P<num>[IVXLCDM]+)\.\s+(?P<m
 _NUMERAL_RE = re.compile(r"^(?P<num>[IVXLCDM]+|\d+)\.\s+(?=\S)")
 _ROMAN_RE = re.compile(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$")
 _ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+
+#: The catalogues of composers' works, as written before the numbers, as in
+#: "BWV 846", "op. 2 no. 4", "K. 331" or "TWV 40:18".
+_CATALOGUES = frozenset({
+    "anh", "b", "bb", "buxwv", "bwv", "cw", "d", "fp", "fwv", "gwv", "h", "hob", "hwv", "jw", "k",
+    "kv", "l", "lwv", "m", "mwv", "op", "rv", "s", "sv", "swv", "sz", "trv", "twv", "w", "wab",
+    "wd", "woo", "wq", "z", "zwv",
+})  # fmt: skip
+#: Catalogues that number their groups in Roman numerals, as in "Hob. XVI:52".
+_ROMAN_CATALOGUES = frozenset({"hob", "jw"})
+#: How a number in a set is introduced, as in "op. 2 no. 4".
+_NUMBER_IN_SET = frozenset({"no", "nr", "nº", "n°"})
+_NAME_SEPARATORS_RE = re.compile(r"[\s,;()\[\]\"“”„]+")
 
 
 @dataclass(frozen=True)
@@ -210,6 +224,9 @@ class Node:
     composers: tuple[Artist, ...] | None
     #: Part number to display: the position, or a number parsed from the title.
     number: int | None
+    #: The numeral removed from the start of the name, as the title writes
+    #: it ("III" for "III. Sequentia"), or None.
+    numeral: str | None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -218,6 +235,8 @@ class Node:
             "name": self.name,
             "type": self.type,
             "position": self.position,
+            "number": self.number,
+            "numeral": self.numeral,
             "part_total": self.part_total,
             "part_attributes": list(self.part_attributes),
             "collections": [
@@ -237,15 +256,24 @@ class Segment:
     #: Top-level work first, the work the recording performs last.
     path: tuple[Node, ...]
     attributes: tuple[str, ...]
+    #: Which node of the path is the work, rather than a part of one (see
+    #: _work_index).
+    work_index: int = 0
+    #: For a recording of only part of the performed work, the name its title
+    #: gives that part, when that isn't the performed work's own name (see
+    #: with_excerpts).
+    excerpt: str | None = None
 
     @property
-    def work(self) -> Node:
+    def performed(self) -> Node:
         return self.path[-1]
 
     def to_json(self) -> dict[str, Any]:
         return {
             "path": [node.to_json() for node in self.path],
+            "work_index": self.work_index,
             "attributes": list(self.attributes),
+            "excerpt": self.excerpt,
         }
 
 
@@ -306,54 +334,51 @@ def resolve(
     # A recording linked to both a work and one of its parts (an editing
     # mistake that does occur) is a performance of the part.
     ancestors = {node.id for segment in segments for node in segment.path[:-1]}
-    segments = [segment for segment in segments if segment.work.id not in ancestors]
+    segments = [segment for segment in segments if segment.performed.id not in ancestors]
 
     # The recording-work relationships are unordered, so order by position in
     # the parent works, keeping separate top-level works in web service order.
-    root_order: dict[str, int] = {}
+    by_root: dict[str, list[Segment]] = {}
     for segment in segments:
-        root_order.setdefault(segment.path[0].id, len(root_order))
-    segments.sort(
-        key=lambda segment: (
-            root_order[segment.path[0].id],
-            [_position_key(node) for node in segment.path[1:]],
-        )
-    )
-    return Resolution(tuple(segments), frozenset(unknown))
+        by_root.setdefault(segment.path[0].id, []).append(segment)
+    ordered: list[Segment] = []
+    for group in by_root.values():
+        group.sort(key=lambda segment: [_position_key(node) for node in segment.path[1:]])
+        work_index = _work_index([segment.path for segment in group])
+        ordered.extend(replace(segment, work_index=work_index) for segment in group)
+    return Resolution(tuple(ordered), frozenset(unknown))
 
 
-def standard_tags(segments: Sequence[Segment], work_level: str = WORK_LEVEL_TOP) -> StandardTags:
+def standard_tags(segments: Sequence[Segment]) -> StandardTags:
     """Values for Picard's standard work and movement tags.
 
-    With ``WORK_LEVEL_TOP`` the work tag is the top-level work and the
-    movement names all the levels below it ("Akt I: No. 1 Introduktion"). With
-    ``WORK_LEVEL_PARENT`` the work tag is the performed work's parent and the
-    movement is the performed work only. Several works in one track are
-    combined ("Passepied I / Passepied II"); the movement number is the first
-    one's.
+    The work tag is the work, usually the top-level one (see _work_index).
+    The movement names the levels below it, numbered as their titles number
+    them ("Akt I: No. 1 Introduktion", "I. oddíl: III. Sequentia: Quid sum
+    miser"), the performed work last, by its excerpt if it has one. Several
+    works in one track are combined ("Passepied I / Passepied II"). The
+    movement number is the first one's, and left out of the movement tag.
     """
     work_titles: list[str] = []
-    groups: dict[str, list[tuple[Node, ...]]] = {}
+    movements: dict[str, list[tuple[tuple[Node, ...], str]]] = {}
     first_movement: Segment | None = None
     for segment in segments:
-        path = segment.path
-        split = len(path) - 2 if work_level == WORK_LEVEL_PARENT and len(path) > 1 else 0
-        work = path[split]
+        work = segment.path[segment.work_index]
         if work.title not in work_titles:
             work_titles.append(work.title)
-        below = path[split + 1 :]
-        if below:
-            groups.setdefault(work.id, []).append(below)
+        if segment.work_index < len(segment.path) - 1:
+            levels = segment.path[segment.work_index + 1 : -1]
+            name = segment.excerpt or segment.performed.name
+            movements.setdefault(work.id, []).append((levels, name))
             if first_movement is None:
                 first_movement = segment
 
     if first_movement is None:
         return StandardTags(tuple(work_titles), None, None, None)
-    movement = " / ".join(_movement_text(paths) for paths in groups.values())
     return StandardTags(
         work=tuple(work_titles),
-        movement=movement,
-        movementnumber=first_movement.work.number,
+        movement=" / ".join(_movement_text(group) for group in movements.values()),
+        movementnumber=first_movement.performed.number,
         movementtotal=first_movement.path[-2].part_total,
     )
 
@@ -370,9 +395,9 @@ def title_tags(segments: Sequence[Segment], recording_title: str | None) -> Stan
     titles don't all name movements of the same work.
     """
     if segments:
-        if any(len(segment.path) > 1 or segment.work.collections for segment in segments):
+        if any(len(segment.path) > 1 or segment.performed.collections for segment in segments):
             return None
-        titles = [segment.work.title for segment in segments]
+        titles = [segment.performed.title for segment in segments]
     elif recording_title:
         titles = [recording_title]
     else:
@@ -418,7 +443,7 @@ def inherited_composers(segments: Sequence[Segment]) -> tuple[Artist, ...]:
     """
     result: dict[str, Artist] = {}
     for segment in segments:
-        if segment.work.composers:
+        if segment.performed.composers:
             continue
         for node in reversed(segment.path[:-1]):
             if node.composers:
@@ -433,8 +458,8 @@ def apply_composer_tags(metadata: MetadataLike, segments: Sequence[Segment]) -> 
 
     Composers already in the tags, by ID, are not added again, so a track
     with linked and unlinked works keeps Picard's names for the linked ones,
-    and the tags can be updated again each time more ancestors are known.
-    Other values are left as they are.
+    and tags written again, as for a standalone recording once its lookups
+    have finished, get nothing twice. Other values are left as they are.
     """
     present = set(metadata.getall("musicbrainz_composerid"))
     extra = [artist for artist in inherited_composers(segments) if artist.id not in present]
@@ -452,29 +477,28 @@ def apply_composer_tags(metadata: MetadataLike, segments: Sequence[Segment]) -> 
 
 
 def apply_tags(
-    metadata: MetadataLike,
-    segments: Sequence[Segment],
-    work_level: str = WORK_LEVEL_TOP,
-    recording_title: str | None = None,
+    metadata: MetadataLike, segments: Sequence[Segment], recording_title: str | None = None
 ) -> None:
-    """Write the work, movement and work_hierarchy tags.
+    """Write the work, movement and work_hierarchy tags, and inherited composers.
 
     Tags that do not apply are deleted so stale values are removed from files.
-    The work_hierarchy tag only describes what MusicBrainz links, so the
-    tags read from titles (see title_tags) only go in the standard tags.
+    The work_hierarchy tag only describes the works MusicBrainz links, so a
+    work and movement read from titles instead (see title_tags) only go in
+    the standard tags. Composers are added as apply_composer_tags describes.
     """
+    segments = with_excerpts(segments, recording_title)
     from_titles = title_tags(segments, recording_title)
-    if not segments:
+    if segments:
+        _write_standard_tags(metadata, from_titles or standard_tags(segments))
+        metadata[JSON_TAG] = to_json(segments)
+    else:
         metadata.delete(JSON_TAG)
         if from_titles is None:
             for name in MOVEMENT_TAGS:
                 metadata.delete(name)
         else:
             _write_standard_tags(metadata, from_titles)
-        return
-
-    _write_standard_tags(metadata, from_titles or standard_tags(segments, work_level))
-    metadata[JSON_TAG] = to_json(segments)
+    apply_composer_tags(metadata, segments)
 
 
 def _write_standard_tags(metadata: MetadataLike, tags: StandardTags) -> None:
@@ -494,11 +518,12 @@ def _write_standard_tags(metadata: MetadataLike, tags: StandardTags) -> None:
 
 def display_name(
     title: str, parent_title: str | None, position: int | None
-) -> tuple[str, int | None]:
+) -> tuple[str, int | None, str | None]:
     """A part's name without its parent's title, and the number taken from it.
 
     "Symphony no. 5 in C minor, op. 67: I. Allegro con brio" under "Symphony
-    no. 5 in C minor, op. 67" at position 1 gives ("Allegro con brio", 1). The
+    no. 5 in C minor, op. 67" at position 1 gives ("Allegro con brio", 1,
+    "I"): the name, the number and the numeral it was written as. The
     parent prefix does not need to match exactly; parts are often titled with
     a shortened form of their parent's title, as in "Die Zauberflöte: Akt I.
     No. 1 Introduktion" under "Die Zauberflöte, K. 620: Akt I". A leading
@@ -506,16 +531,16 @@ def display_name(
     is not lost when MusicBrainz's numbering and ordering disagree.
     """
     if parent_title is None:
-        return title, None
+        return title, None, None
     name = title[_parent_prefix_end(title, parent_title) :]
-    number = None
+    number = numeral = None
     match = _NUMERAL_RE.match(name)
     if match:
         value = _numeral_value(match.group("num"))
         if value is not None and (position is None or value == position):
             name = name[match.end() :]
-            number = value
-    return name.strip() or title, number
+            number, numeral = value, match.group("num")
+    return name.strip() or title, number, numeral
 
 
 def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, ...], str | None]:
@@ -550,7 +575,9 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
         info = level if isinstance(level, WorkInfo) else None
         # The relationship to the level above was recorded on this level.
         position = parent_link.position if parent_link else None
-        name, numeral = display_name(level.title, parent.title if parent else None, position)
+        name, number, numeral = display_name(
+            level.title, parent.title if parent else None, position
+        )
         node = Node(
             id=level.id,
             title=level.title,
@@ -561,25 +588,144 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
             part_attributes=parent_link.attributes if parent_link else (),
             collections=info.collections if info else (),
             composers=info.composers if info else None,
-            number=position if position is not None else numeral,
+            number=position if position is not None else number,
+            numeral=numeral,
         )
         nodes.append(node)
         parent = node
     return tuple(nodes), missing
 
 
-def _movement_text(paths: Sequence[tuple[Node, ...]]) -> str:
-    """Join paths below a work, naming levels they share only once."""
-    shortest = min(len(path) for path in paths)
+def _movement_text(movements: Sequence[tuple[tuple[Node, ...], str]]) -> str:
+    """Join movements below a work, naming the levels they share only once.
+
+    Each movement is the levels between the work and the performed work, and
+    the performed work's name.
+    """
+    shortest = min(len(levels) for levels, _ in movements)
     common = 0
-    while common < shortest - 1 and len({path[common].id for path in paths}) == 1:
+    while common < shortest and len({levels[common].id for levels, _ in movements}) == 1:
         common += 1
     rests: list[str] = []
-    for path in paths:
-        rest = ": ".join(node.name for node in path[common:])
+    for levels, name in movements:
+        rest = ": ".join([*map(_level_name, levels[common:]), name])
         if rest not in rests:
             rests.append(rest)
-    return ": ".join([node.name for node in paths[0][:common]] + [" / ".join(rests)])
+    shared = movements[0][0][:common]
+    return ": ".join([*map(_level_name, shared), " / ".join(rests)])
+
+
+def _level_name(node: Node) -> str:
+    """A level's name with the number its title gives it, as in "III. Sequentia"."""
+    return f"{node.numeral}. {node.name}" if node.numeral else node.name
+
+
+def with_excerpts(segments: Sequence[Segment], recording_title: str | None) -> list[Segment]:
+    """The segments, with the excerpts the recording's title names.
+
+    MusicBrainz links each recording of part of a work, such as the tracks a
+    movement is split into, to the whole work, which names them all the
+    same ("Ouverture"). The recording's title names the part: "Music for the
+    Royal Fireworks, HWV 351: Ia. Overture – Adagio" is read as the title of
+    a part of the performed work's parent would be (see display_name), giving
+    "Ia. Overture – Adagio". A title in another language, not starting with
+    the parent's, is read as "<Work>: <Part>" or "<Work> - <Part>".
+    """
+    result = []
+    for segment in segments:
+        excerpt = None
+        if recording_title and PARTIAL_ATTRIBUTE in segment.attributes and len(segment.path) > 1:
+            excerpt = _excerpt(recording_title, segment.path[-2], segment.performed)
+        result.append(replace(segment, excerpt=excerpt) if excerpt else segment)
+    return result
+
+
+def _excerpt(title: str, parent: Node, performed: Node) -> str | None:
+    if not _parent_prefix_end(title, parent.title):
+        _, separator, rest = title.partition(": ")
+        if not separator:
+            rest = title.partition(" - ")[2]
+        title = rest.strip()
+        if not title:
+            return None
+    name = display_name(title, parent.title, performed.position)[0]
+    return None if name == performed.name else name
+
+
+def _work_index(paths: Sequence[tuple[Node, ...]]) -> int:
+    """Which level of the paths, all from one top-level work, is the work.
+
+    The top-level work, unless a part of it has a catalogue number of its
+    own, one the works above it don't have, as each Prelude and Fugue of The
+    Well-Tempered Clavier (BWV 846 and on) does but its books, or the acts of
+    an opera, don't: the work is then the deepest such part, if every path
+    goes through it. The names of movements often repeat their work's
+    number, or give it another one ("K359: Variation I" in "12 Variations, K.
+    374a/359"), so the performed work only counts if it has parts, like a
+    whole Prelude and Fugue in one track.
+    """
+    first = paths[0]
+    for index in range(len(first) - 1, 0, -1):
+        node = first[index]
+        if _has_own_catalogue_number(node, first[:index]) and all(
+            index < len(path)
+            and path[index].id == node.id
+            and (index < len(path) - 1 or bool(path[index].part_total))
+            for path in paths
+        ):
+            return index
+    return 0
+
+
+def _has_own_catalogue_number(node: Node, above: Sequence[Node]) -> bool:
+    theirs = {number for work in above for number in _catalogue_numbers(work.name)}
+    return any(number not in theirs for number in _catalogue_numbers(node.name))
+
+
+def _catalogue_numbers(name: str) -> list[str]:
+    """The catalogue numbers in a work's name, lowercase and without dots.
+
+    "bwv 846" in "Prelude and Fugue no. 1 in C major, BWV 846", or "op 2 no
+    4" in "Sonata da camera a trè in E minor, op. 2 no. 4"; none in "Book I"
+    or "Act II".
+    """
+    words = [word for word in _NAME_SEPARATORS_RE.split(name) if word]
+
+    def catalogue(word: str) -> str | None:
+        word = word.removesuffix(".").lower()
+        return word if word in _CATALOGUES else None
+
+    def is_number(catalogue: str, number: str) -> bool:
+        return _starts_with_digit(number) or (
+            catalogue in _ROMAN_CATALOGUES and number[:1] in ("I", "V", "X")
+        )
+
+    numbers = []
+    for i, word in enumerate(words):
+        following = words[i + 1] if i + 1 < len(words) else ""
+        found = catalogue(word)
+        if found and is_number(found, following):
+            number, after = following, i + 2
+        else:
+            # Written as one word, as in "op.2" or "W389".
+            split = next((j for j, char in enumerate(word) if not char.isalpha()), len(word))
+            found, number = catalogue(word[:split]), word[split:].removeprefix(".")
+            if not found or not is_number(found, number):
+                continue
+            after = i + 1
+        result = f"{found} {number.rstrip('.:').lower()}"
+        # A number in a set, as in "op. 2 no. 4", unless the name of a part
+        # follows a colon, as in "op. 90, D. 899: No. 1".
+        if not number.endswith(":") and after + 1 < len(words):
+            no, set_number = words[after : after + 2]
+            if no.rstrip(".").lower() in _NUMBER_IN_SET and _starts_with_digit(set_number):
+                result += f" no {set_number.rstrip('.:').lower()}"
+        numbers.append(result)
+    return numbers
+
+
+def _starts_with_digit(text: str) -> bool:
+    return "0" <= text[:1] <= "9"
 
 
 def _parent_prefix_end(child: str, parent: str) -> int:
@@ -589,7 +735,9 @@ def _parent_prefix_end(child: str, parent: str) -> int:
     found in order in the parent's title (case and accent insensitive; parent
     words may be skipped, as in "Die Zauberflöte" for "Die Zauberflöte, K.
     620") and be followed by a separator, possibly after closing quotes,
-    brackets or other punctuation. Returns 0 when there is no prefix.
+    brackets or other punctuation. A comma or period followed by the
+    parent's next word is the parent's own, as in "no. 14" or "K. 620", so
+    the child is still quoting it there. Returns 0 when there is no prefix.
     """
     parent_words = [_fold(word) for word in _WORD_RE.findall(parent)]
     if not parent_words:
@@ -609,11 +757,20 @@ def _parent_prefix_end(child: str, parent: str) -> int:
                 break
             index += 1
         rest = _BEFORE_SEPARATOR_RE.sub("", child[match.end() :])
-        following = rest[:1]
-        if following and following in _SEPARATORS:
-            remainder = _LEADING_SEPARATORS_RE.sub("", rest)
-            if _WORD_RE.search(remainder):
-                end = len(child) - len(remainder)
+        separator = rest[:1]
+        if not separator or separator not in _SEPARATORS:
+            continue
+        remainder = _LEADING_SEPARATORS_RE.sub("", rest)
+        next_word = _WORD_RE.search(remainder)
+        if next_word is None:
+            continue
+        if (
+            separator in ".,"
+            and index < len(parent_words)
+            and _fold(next_word.group()) == parent_words[index]
+        ):
+            continue
+        end = len(child) - len(remainder)
     return end
 
 
@@ -625,7 +782,9 @@ def _fold(text: str) -> str:
 def _numeral_value(numeral: str) -> int | None:
     if numeral.isdigit():
         return int(numeral)
-    if not _ROMAN_RE.match(numeral):
+    # A single C, D, L or M is a letter, as in "C. Credo", or the catalogue
+    # in Schubert's "D. 899" or Scarlatti's "L. 413", not 100, 500, 50 or 1000.
+    if numeral in ("C", "D", "L", "M") or not _ROMAN_RE.match(numeral):
         return None
     total = 0
     for char, following in zip(numeral, numeral[1:] + " ", strict=False):

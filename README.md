@@ -67,15 +67,28 @@ And for an opera number (Die Zauberflöte → Akt I → No. 1):
 
 The rules:
 
-- `work` is the top-level work, and `movement` names every level below it,
-  joined with ": ". In **Options → Plugins → Work Hierarchy** you can make
-  `work` the performed work's parent instead (`Die Zauberflöte, K. 620: Akt I`),
-  in which case `movement` is only the performed work (`No. 1 Introduktion …`).
+- `work` is the top-level work, unless a part of it has a catalogue number
+  of its own, one the works above it don't have. Then the deepest such part
+  is the work: each Prelude and Fugue of *The Well-Tempered Clavier* (BWV 846
+  and on), each sonata of a set like *12 sonate da camera, op. 2* (op. 2 no.
+  4). Acts and books have no catalogue numbers, so an opera stays the work.
+  A track of a whole such part, a Prelude and Fugue in one track, has no
+  movement tags. Movements often repeat their work's number, or give it
+  another one, so the performed work only counts when it has parts.
+- `movement` names every level below the work, joined with ": ", with their
+  numbers ("I. oddíl: III. Sequentia: Quid sum miser"), except the performed
+  work's, which is `movementnumber`. Players that want a different level can
+  read it from `work_hierarchy`.
 - Movement names have their parent's title removed, along with a leading
   number like "V." when it matches the movement's position. MusicBrainz often
   titles parts with a shortened form of the parent's title ("Die Zauberflöte:
   Akt I. No. 1 …" under "Die Zauberflöte, K. 620: Akt I"), so the match allows
   words to be skipped.
+- A track with only part of a movement (MusicBrainz marks the performance
+  "partial"), such as one half of an overture in two tracks, is named after
+  its recording's title: "Ia. Overture – Adagio" in "Music for the Royal
+  Fireworks, HWV 351: Ia. Overture – Adagio", rather than "Ouverture", which
+  MusicBrainz links all the halves to. The levels above stay in `movement`.
 - When a track contains several works, their names are joined with " / ".
   Levels they share are named once ("Akt II: „Die Strahlen…” / „Heil sei
   euch…”"). `movementnumber` is the first one's.
@@ -94,15 +107,14 @@ The rules:
   none, their titles, or the recording's, are read as "<Work>: <Roman
   numeral>. <Movement>", as the Work & Movement plugin does, for `work`,
   `movement` and `movementnumber`. `work_hierarchy` still only describes
-  what MusicBrainz links.
+  the works MusicBrainz links.
 - Otherwise, if the recording has no work relationships, the movement tags
   and `work_hierarchy` are deleted so stale values don't linger in files.
 - When a performed work has no composer on MusicBrainz, but a work above it
   does, the nearest such work's composers are added to `composer`,
   `composersort` and `musicbrainz_composerid`. They're added after any
   composers Picard set for the track's other works, using their MusicBrainz
-  names (not translated or as credited). Turn this off in **Options →
-  Plugins → Work Hierarchy**.
+  names (not translated or as credited).
 - `musicbrainz_workid` is left as Picard sets it: the IDs of the works the
   recording performs. Picard's original `work` and `musicbrainz_workid` values
   are kept in the `_recording_work` and `_recording_workid` script variables,
@@ -127,6 +139,8 @@ A JSON object. Track 4 above:
           "name": "Ouvertüre nach französischer Art h-Moll, BWV 831",
           "type": "Suite",
           "position": null,
+          "number": null,
+          "numeral": null,
           "part_total": 11,
           "part_attributes": [],
           "collections": [],
@@ -140,6 +154,8 @@ A JSON object. Track 4 above:
           "name": "Passepied I",
           "type": null,
           "position": 5,
+          "number": 5,
+          "numeral": "V",
           "part_total": 0,
           "part_attributes": [],
           "collections": [],
@@ -148,7 +164,9 @@ A JSON object. Track 4 above:
           ]
         }
       ],
-      "attributes": []
+      "work_index": 0,
+      "attributes": [],
+      "excerpt": null
     },
     {
       "path": [
@@ -159,6 +177,8 @@ A JSON object. Track 4 above:
           "name": "Passepied II",
           "type": null,
           "position": 6,
+          "number": 6,
+          "numeral": "VI",
           "part_total": 0,
           "part_attributes": [],
           "collections": [],
@@ -167,7 +187,9 @@ A JSON object. Track 4 above:
           ]
         }
       ],
-      "attributes": []
+      "work_index": 0,
+      "attributes": [],
+      "excerpt": null
     }
   ]
 }
@@ -180,8 +202,14 @@ A JSON object. Track 4 above:
 - **`segments`**: one entry per work the track performs, in performance order.
   - **`path`**: from the top-level work (first) down to the performed work
     (last). Paths in one track can have different lengths.
+  - **`work_index`**: which node of `path` is the work, as for the `work` tag:
+    `0` for the top-level work, or a part with a catalogue number of its own
+    (see above). It's the same for the segments under one top-level work.
   - **`attributes`**: the recording–work relationship's attributes, such as
     `partial`, `live`, `medley`, `instrumental` or `cover`.
+  - **`excerpt`**: for a track with only part of the performed work
+    (`partial`), the name the recording's title gives that part, in the form
+    of `name`, when it isn't the performed work's `name`; otherwise `null`.
 - Each **path node**:
   - `id`: MusicBrainz work ID.
   - `title`: the full MusicBrainz title.
@@ -190,6 +218,11 @@ A JSON object. Track 4 above:
   - `type`: MusicBrainz work type (`Opera`, `Symphony`, `Aria`, …) or `null`.
   - `position`: position in the parent work, or `null` for the top-level work
     or when MusicBrainz doesn't give one.
+  - `number`: the number to show for the work: its `position`, or else the
+    number its title starts with (as in "Mass: II. Gloria"), or `null`.
+  - `numeral`: the number removed from the start of the title to give
+    `name`, as the title writes it (`"V"` for "V. Passepied I"), or `null`.
+    A number that disagrees with `position` stays in `name` instead.
   - `part_total`: the highest position among this work's parts (the number of
     parts if none are numbered; `0` if it has none), or `null` if the work's
     own data couldn't be looked up.
@@ -208,8 +241,9 @@ A JSON object. Track 4 above:
 
 ### Grouping
 
-- To group tracks by composition, use the first path node's `id`. Within a
-  composition, sort by the `position` values along each path.
+- To group tracks by composition, use the `id` of the path node at
+  `work_index`. Within a composition, sort by the `position` values along
+  each path.
 - Each segment is one movement, so a track with two segments can be listed
   under both movements.
 - **Timing isn't included.** MusicBrainz doesn't record where in a recording
@@ -223,18 +257,22 @@ When Picard loads an album, the release data already includes, for each
 recording, the works it performs and each work's immediate parent. The plugin
 looks up each parent with `/ws/2/work/<id>?inc=work-rels+artist-rels` to find
 the next level up, how many parts it has and who composed it, and repeats
-until it reaches a top-level work. Lookups are shared between tracks (twenty
-tracks of three suites cost three requests) and cached for 10 minutes. Picard
-waits for them before finishing the album. If a lookup fails, the affected
-tracks are tagged with the levels that are known, and the album still loads.
+until it reaches a top-level work. The lookups are made for the whole release
+at once (twenty tracks of three suites cost three requests), shared with
+other albums loading at the same time, and cached for 10 minutes. Picard
+waits for them before creating the album's tracks, so each track is tagged
+once, with the complete hierarchy, before other plugins' track processors and
+the tagger scripts run. If a lookup fails, the affected tracks are tagged with
+the levels that are known, and the album still loads.
 Picard's Stop button stops the lookups too, and the albums still loading are
 shown as stopped, as with Picard's own requests, rather than as loaded with
 the hierarchy incomplete.
 
 For standalone recordings ("non-album tracks"), Picard finishes loading before
 the lookups return. Once they arrive, the plugin tags the track, runs the
-tagger scripts on it again, as Picard does when loading, and updates its files.
-Changes made to the track in Picard before then are lost.
+tagger scripts on it again, as Picard does when loading, and updates its files,
+keeping any tags changed in Picard meanwhile. If the lookups find nothing new,
+the track is left as it is.
 
 ## Development
 
@@ -250,17 +288,14 @@ The repository is the plugin: Picard installs it by cloning it, and loads
 
 - `hierarchy.py`: resolution, naming and tag logic, with no Picard
   dependency.
-- `__init__.py`: the Picard plugin (metadata processor, work lookups, options
-  page).
+- `__init__.py`: the Picard plugin (metadata processors and work lookups). It
+  has no settings: the tags are meant to be right as they are.
 - `tests/test_hierarchy.py`: the logic, against real MusicBrainz data.
 - `tests/test_plugin.py`: the plugin, loaded by Picard's own plugin code,
   running inside Picard 3's real album and track loading code, with only the
   web service faked.
 - `tests/test_install.py`: the working tree installing from git through
-  Picard's plugin manager, and the options page.
-- `locale/en.toml`: the interface text, in English; see Translating below.
-- `tests/test_translations.py`: `locale/en.toml` against the text in the
-  code, and a translation being used.
+  Picard's plugin manager.
 - `conftest.py`: stops pytest importing the top-level `__init__.py`, which
   only works inside Picard.
 - `scripts/fetch_fixtures.py`: re-downloads the test fixtures in
@@ -278,27 +313,14 @@ the same UUID.
 
 ## Translating
 
-The options page's text is in `locale/en.toml`. To translate it, copy that
-file to `locale/<language>.toml`, for example `locale/de.toml` or
-`locale/pt_BR.toml`, and translate the values, keeping the keys. Picard uses
-the file for its interface language, and English for any text it doesn't
-have.
-
-The plugin's name and descriptions, shown in Picard's plugin list, are
-translated in `MANIFEST.toml` instead, in `[name_i18n]`, `[description_i18n]`
-and `[long_description_i18n]` tables:
+The plugin has no interface of its own. Its name and descriptions, shown in
+Picard's plugin list, are translated in `MANIFEST.toml`, in `[name_i18n]`,
+`[description_i18n]` and `[long_description_i18n]` tables:
 
 ```toml
 [name_i18n]
 de = "Werkhierarchie"
 ```
-
-`locale/en.toml` repeats them under `manifest.*` keys, as other Picard plugins
-do, so translators have all the text in one place.
-
-When adding interface text to the code, use `self.api.tr("key", "English
-text")` (or `t_()` for class attributes), and add the key and text to
-`locale/en.toml`; the tests check the two match.
 
 ## License
 
