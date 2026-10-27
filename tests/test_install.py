@@ -109,7 +109,7 @@ def test_plugin_installs_from_git(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
         PLUGIN_ID,
-        "Work Hierarchy 0.3 enabled",
+        "Work Hierarchy 0.3.1 enabled",
         # Installed as a copy in Picard's plugin directory.
         "True",
         f"['picard.plugins.{PLUGIN_ID}']",

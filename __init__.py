@@ -10,24 +10,52 @@ from picard.plugin3.api import PluginApi
 from picard.track import NonAlbumTrack
 from PyQt6.QtNetwork import QNetworkReply
 
-from .hierarchy import WorkInfo, apply_tags, performances, resolve
+from .hierarchy import WorkInfo, apply_tags, main_names, performances, resolve
+
+try:
+    from picard.mbjson import _translate_artist_node
+except ImportError:
+    # Internal to Picard, so a later version could lose it.
+    _translate_artist_node = None
 
 #: How long looked-up works are reused before being requested again, so
 #: corrections made on MusicBrainz show up when an album is refreshed.
 CACHE_SECONDS = 10 * 60
 
 
+def picard_names(artist):
+    """An artist's name and sort name as Picard tags a composer it finds itself.
+
+    That follows "Translate artist names" and "Use artist sort name for
+    translation" in Options > Metadata. The web service only gives the
+    aliases of related artists in some lookups, and never in work lookups,
+    so a composer with a name in another script is often only translated
+    from its sort name ("Tchaikovsky, Pyotr Ilyich"). Picard's function is
+    internal, so the main names are used if it fails.
+    """
+    if _translate_artist_node is None:
+        return main_names(artist)
+    try:
+        alias = _translate_artist_node(artist)
+        return alias.name, alias.sort_name
+    except Exception:
+        return main_names(artist)
+
+
 class WorkStore:
     """Looks up works on MusicBrainz, sharing results between lookups.
 
     Concurrent requests for the same work (albums of the same opera, say)
-    are merged into one, and results are cached for a while.
+    are merged into one, and results are cached for a while. The cache keeps
+    the responses, and their composers are named each time they're read, so
+    a change to Picard's options for translating names applies right away.
     """
 
-    def __init__(self, cache_seconds=CACHE_SECONDS, clock=time.monotonic):
+    def __init__(self, cache_seconds=CACHE_SECONDS, clock=time.monotonic, name_artist=main_names):
         self._cache_seconds = cache_seconds
         self._clock = clock
-        self._works = {}  # work ID -> (time fetched, WorkInfo)
+        self._name_artist = name_artist
+        self._works = {}  # work ID -> (time fetched, response)
         self._pending = {}  # work ID -> callbacks waiting for it
         self._api = None
 
@@ -41,7 +69,10 @@ class WorkStore:
         ]
         for work_id in expired:
             del self._works[work_id]
-        return {work_id: work for work_id, (_, work) in self._works.items()}
+        return {
+            work_id: WorkInfo.from_json(response, self._name_artist)
+            for work_id, (_, response) in self._works.items()
+        }
 
     def watch(self, api):
         """Start looking up works, and noticing lookups the web service drops."""
@@ -105,8 +136,8 @@ class WorkStore:
             api.logger.warning("Could not load work %s: %s", work_id, error)
         else:
             try:
-                work = WorkInfo.from_json(response)
-                self._works[work_id] = (self._clock(), work)
+                work = WorkInfo.from_json(response, self._name_artist)
+                self._works[work_id] = (self._clock(), response)
             except Exception:
                 api.logger.error("Could not read work %s: %s", work_id, traceback.format_exc())
         self._notify(api, work_id, work, stopped)
@@ -137,7 +168,7 @@ class WorkStore:
                 api.logger.error("%s", traceback.format_exc())
 
 
-_store = WorkStore()
+_store = WorkStore(name_artist=picard_names)
 
 
 class AncestorLookup:
@@ -233,7 +264,7 @@ def process_album(api, album, metadata, release_node):
     performed = [
         performance
         for recording in _recordings(release_node)
-        for performance in performances(recording)
+        for performance in performances(recording, picard_names)
     ]
     task_id = f"{api.plugin_id}_works_{uuid.uuid4().hex}"
     album_ref = weakref.ref(album)
@@ -288,7 +319,7 @@ def process_track(api, track, metadata, track_node, release_node=None):
     metadata["~recording_work"] = metadata.getall("work")
     metadata["~recording_workid"] = metadata.getall("musicbrainz_workid")
     write_tags = partial(apply_tags, recording_title=recording.get("title"))
-    performed = performances(recording)
+    performed = performances(recording, picard_names)
     if isinstance(track, NonAlbumTrack):
         _tag_standalone(api, track, metadata, performed, write_tags)
     else:

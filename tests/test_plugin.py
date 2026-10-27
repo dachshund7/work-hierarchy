@@ -214,6 +214,46 @@ def test_composer_is_inherited_from_the_parent_work(picard_env):
     assert track(album, 1, 3).metadata.getall("musicbrainz_composerid") == [MOZART_ID]
 
 
+def serve_with_cyrillic_mozart(web):
+    """Answer the work lookups, with Mozart's name in Cyrillic, as for a composer
+    whose main name on MusicBrainz is in another script."""
+    while web.queue:
+        work_id, handler = web.queue.pop(0)
+        work = load_work(work_id)
+        for rel in work.get("relations", ()):
+            artist = rel.get("artist")
+            if artist and artist.get("id") == MOZART_ID:
+                artist["name"] = "Вольфганг Амадей Моцарт"
+        handler(work, MagicMock(), None)
+
+
+def test_inherited_composers_are_named_as_picard_names_composers(picard_env):
+    # Without "Translate artist names", MusicBrainz's main name, as Picard
+    # writes for the composers it finds itself
+    album = start_album_load(zauberfloete_with_unlinked_composer())
+    serve_with_cyrillic_mozart(picard_env.web)
+    assert track(album, 1, 2).metadata.getall("composer") == ["Вольфганг Амадей Моцарт"]
+
+    # With it and "Use artist sort name for translation", the sort name
+    # turned around, as work lookups give no aliases of their composers
+    picard_env.settings["translate_artist_names"] = True
+    picard_env.settings["translate_from_sortname"] = True
+    album = start_album_load(zauberfloete_with_unlinked_composer())
+    serve_with_cyrillic_mozart(picard_env.web)
+    assert tags(track(album, 1, 2), "composer", "composersort") == {
+        "composer": ["Wolfgang Amadeus Mozart"],
+        "composersort": ["Mozart, Wolfgang Amadeus"],
+    }
+    hierarchy = json.loads(track(album, 1, 2).metadata["work_hierarchy"])
+    names = {
+        composer["name"]
+        for segment in hierarchy["segments"]
+        for node in segment["path"]
+        for composer in node["composers"]
+    }
+    assert names == {"Wolfgang Amadeus Mozart"}
+
+
 def test_later_processors_see_the_complete_tags(picard_env):
     seen = {}
 

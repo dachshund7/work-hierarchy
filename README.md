@@ -113,8 +113,14 @@ The rules:
 - When a performed work has no composer on MusicBrainz, but a work above it
   does, the nearest such work's composers are added to `composer`,
   `composersort` and `musicbrainz_composerid`. They're added after any
-  composers Picard set for the track's other works, using their MusicBrainz
-  names (not translated or as credited).
+  composers Picard set for the track's other works, named the way Picard
+  names the composers it sets itself: by their MusicBrainz names, or, with
+  "Translate artist names" in Options > Metadata, translated. MusicBrainz
+  gives no aliases of the composers in work lookups, so a name in another
+  script is only translated with "Use artist sort name for translation",
+  from the sort name ("Tchaikovsky, Pyotr Ilyich" gives "Pyotr Ilyich
+  Tchaikovsky"). That option also applies to the composers Picard sets
+  itself, which get no aliases either.
 - `musicbrainz_workid` is left as Picard sets it: the IDs of the works the
   recording performs. Picard's original `work` and `musicbrainz_workid` values
   are kept in the `_recording_work` and `_recording_workid` script variables,
@@ -233,11 +239,11 @@ A JSON object. Track 4 above:
   - `composers`: the work's composers as linked on MusicBrainz, each with
     `id` (MusicBrainz artist ID) and `name`; `null` if the work's own data
     couldn't be looked up. Picard's own `composer` and
-    `musicbrainz_composerid` tags cover only the performed works, and
-    `composer` may be as credited or translated, while these are given for
-    every level of the hierarchy, with their MusicBrainz names. A part's
-    `composers` are empty when MusicBrainz links the composer only to its
-    parent, even when the composer tags are inherited (see above).
+    `musicbrainz_composerid` tags cover only the performed works, while
+    these are given for every level of the hierarchy, named as the composer
+    tags are (see above), though never as credited. A part's `composers` are
+    empty when MusicBrainz links the composer only to its parent, even when
+    the composer tags are inherited (see above).
 
 ### Grouping
 

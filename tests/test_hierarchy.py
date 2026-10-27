@@ -762,6 +762,31 @@ def test_composers_are_read_once_each():
     assert [c.id for c in WorkInfo.from_json(node).composers] == ["a"]
 
 
+def test_composers_are_named_by_the_function_given():
+    node = {
+        "id": "w",
+        "title": "Trio",
+        "relations": [
+            {
+                "target-type": "artist",
+                "type": "composer",
+                "artist": {"id": "a", "name": "Пётр Ильич Чайковский", "sort-name": "Tchaikovsky"},
+            },
+        ],
+    }
+    assert WorkInfo.from_json(node).composers[0].name == "Пётр Ильич Чайковский"
+    named = WorkInfo.from_json(node, lambda artist: ("P. I. Tchaikovsky", "Tchaikovsky, P. I."))
+    assert (named.composers[0].name, named.composers[0].sort_name) == (
+        "P. I. Tchaikovsky",
+        "Tchaikovsky, P. I.",
+    )
+    recording = {
+        "relations": [{"target-type": "work", "type": "performance", "work": node}],
+    }
+    [performance] = performances(recording, lambda artist: ("Named", "Named"))
+    assert performance.work.composers[0].name == "Named"
+
+
 # Composers inherited from parent works
 
 MOZART = Artist("b972f589-fb0e-474e-b64a-803b0364fa75", "Wolfgang Amadeus Mozart")

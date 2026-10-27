@@ -14,6 +14,10 @@ works on the JSON documents returned by the MusicBrainz web service:
 MusicBrainz does not record where in a recording each work starts, so nothing
 here deals with timing: a track is described by the ordered list of works it
 contains, and nothing more.
+
+Composers are named by MusicBrainz's main name and sort name unless a
+function is given to name them (see ArtistNamer), which the plugin uses to
+follow Picard's "Translate artist names" options.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -101,6 +105,16 @@ class WorkLink:
         return COLLECTION_ATTRIBUTE in self.attributes
 
 
+#: Names an artist node of the web service: its name and sort name, as the
+#: tags should have them.
+ArtistNamer = Callable[[Mapping[str, Any]], "tuple[str, str]"]
+
+
+def main_names(artist: Mapping[str, Any]) -> tuple[str, str]:
+    """An artist's main name and sort name on MusicBrainz."""
+    return artist.get("name") or "", artist.get("sort-name") or ""
+
+
 @dataclass(frozen=True)
 class Artist:
     id: str
@@ -120,16 +134,15 @@ class WorkInfo:
     composers: tuple[Artist, ...] = ()
 
     @classmethod
-    def from_json(cls, node: Mapping[str, Any]) -> WorkInfo:
+    def from_json(cls, node: Mapping[str, Any], name_artist: ArtistNamer = main_names) -> WorkInfo:
+        """A work node of the web service, its composers named by ``name_artist``."""
         parents = []
         parts = []
         composers = []
         for rel in node.get("relations") or ():
             if rel.get("target-type") == "artist" and rel.get("type") == "composer":
                 artist = rel.get("artist") or {}
-                composer = Artist(
-                    artist.get("id") or "", artist.get("name") or "", artist.get("sort-name") or ""
-                )
+                composer = Artist(artist.get("id") or "", *name_artist(artist))
                 if composer.id and composer not in composers:
                     composers.append(composer)
                 continue
@@ -294,7 +307,9 @@ class StandardTags:
     movementtotal: int | None
 
 
-def performances(recording: Mapping[str, Any]) -> list[Performance]:
+def performances(
+    recording: Mapping[str, Any], name_artist: ArtistNamer = main_names
+) -> list[Performance]:
     """The works a recording node is a performance of, in web service order."""
     result = []
     for rel in recording.get("relations") or ():
@@ -302,7 +317,8 @@ def performances(recording: Mapping[str, Any]) -> list[Performance]:
             continue
         work = rel.get("work") or {}
         if work.get("id"):
-            result.append(Performance(WorkInfo.from_json(work), tuple(rel.get("attributes") or ())))
+            work_info = WorkInfo.from_json(work, name_artist)
+            result.append(Performance(work_info, tuple(rel.get("attributes") or ())))
     return result
 
 
