@@ -23,6 +23,25 @@ one.
   MusicBrainz doesn't send work relationships, and the plugin leaves tags
   alone.
 
+## Composer names in other scripts
+
+MusicBrainz names some composers in the script of their language, such as
+Валентин Сильвестров or Пётр Ильич Чайковский, and Picard writes those names
+to `composer` unless it translates them. To have them in Latin letters, turn
+on both of these in **Options → Metadata**:
+
+- **"Translate artist names"**, with a language such as English.
+- **"Use artist sort name for translation"**. MusicBrainz sends no aliases of
+  the composers linked to works, which Picard would translate from, so
+  without this option their names stay as they are. With it, a name in
+  another script is taken from the composer's sort name: "Tchaikovsky, Pyotr
+  Ilyich" gives "Pyotr Ilyich Tchaikovsky". Names already in Latin letters
+  stay as they are.
+
+The composers this plugin adds from parent works, and the composers in its
+`work_hierarchy` tag, are named the same way as the ones Picard writes, so
+they all match whichever options are on.
+
 ## Installing
 
 In Picard, go to **Options → Plugins**, click **Install plugin…**, and on the
@@ -114,13 +133,8 @@ The rules:
   does, the nearest such work's composers are added to `composer`,
   `composersort` and `musicbrainz_composerid`. They're added after any
   composers Picard set for the track's other works, named the way Picard
-  names the composers it sets itself: by their MusicBrainz names, or, with
-  "Translate artist names" in Options > Metadata, translated. MusicBrainz
-  gives no aliases of the composers in work lookups, so a name in another
-  script is only translated with "Use artist sort name for translation",
-  from the sort name ("Tchaikovsky, Pyotr Ilyich" gives "Pyotr Ilyich
-  Tchaikovsky"). That option also applies to the composers Picard sets
-  itself, which get no aliases either.
+  names the composers it sets itself (see [Composer names in other
+  scripts](#composer-names-in-other-scripts)).
 - `musicbrainz_workid` is left as Picard sets it: the IDs of the works the
   recording performs. Picard's original `work` and `musicbrainz_workid` values
   are kept in the `_recording_work` and `_recording_workid` script variables,
