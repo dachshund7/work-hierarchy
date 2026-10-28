@@ -49,6 +49,18 @@ JSON_TAG = "work_hierarchy"
 
 MOVEMENT_TAGS = ("movement", "movementnumber", "movementtotal", "showmovement")
 
+#: Tag holding when the recording was made, e.g. "1937-11-08/1938-03-08".
+RECORDING_DATE_TAG = "recordingdate"
+
+#: The relationships of a recording to artists whose dates are when it was
+#: made: those of the players, singers and conductors, and the recording
+#: engineer's. Others can be later, like a mix, or about the release, like
+#: the phonographic copyright.
+_SESSION_ARTIST_TYPES = frozenset({
+    "chorus master", "concertmaster", "conductor", "instrument", "performer",
+    "performing orchestra", "recording", "vocal",
+})  # fmt: skip
+
 #: Attribute of the "parts" relationship that marks a grouping of separate
 #: works (e.g. "6 Partitas, BWV 825-830") rather than a work and its parts.
 COLLECTION_ATTRIBUTE = "part of collection"
@@ -320,6 +332,40 @@ def performances(
             work_info = WorkInfo.from_json(work, name_artist)
             result.append(Performance(work_info, tuple(rel.get("attributes") or ())))
     return result
+
+
+def recording_date(recording: Mapping[str, Any]) -> str | None:
+    """When a recording node was made, from the dates of its relationships.
+
+    The dates are those MusicBrainz gives the performance of its works and
+    the sessions of its artists (see _SESSION_ARTIST_TYPES), which Picard
+    loads with "Use track relationships". The result runs from the earliest
+    to the latest of them, as an ISO 8601 interval, "1937-11-08/1938-03-08",
+    or is a single date when they're all the same. Dates can be partial,
+    such as "2011-12" or "1992". None when no relationship has a date.
+    """
+    dates = []
+    for rel in recording.get("relations") or ():
+        target, kind = rel.get("target-type"), rel.get("type")
+        if (target, kind) != ("work", "performance") and not (
+            target == "artist" and kind in _SESSION_ARTIST_TYPES
+        ):
+            continue
+        dates.extend(date for date in (rel.get("begin"), rel.get("end")) if date)
+    if not dates:
+        return None
+    # ISO dates sort in time order, a partial one before the days it covers
+    first, last = min(dates), max(dates)
+    return first if first == last else f"{first}/{last}"
+
+
+def apply_recording_date(metadata: MetadataLike, recording: Mapping[str, Any]) -> None:
+    """Write the recordingdate tag, or delete it when MusicBrainz has no date."""
+    date = recording_date(recording)
+    if date is None:
+        metadata.delete(RECORDING_DATE_TAG)
+    else:
+        metadata[RECORDING_DATE_TAG] = date
 
 
 def resolve(

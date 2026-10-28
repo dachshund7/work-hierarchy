@@ -11,6 +11,9 @@ Tags classical music with its work and movement structure from MusicBrainz:
   tag holds JSON describing every work in the track and its path from the
   top-level work, for players that want to show the structure or list the
   movements a track contains.
+- **Recording dates.** A `recordingdate` tag says when the recording was
+  made, from the dates MusicBrainz gives its performances, so a reissue
+  can be told from the recording it reissues.
 
 It replaces the Work & Movement plugin, which looks only one level up and uses
 only the first work linked to a recording. Disable that plugin when using this
@@ -83,6 +86,7 @@ And for an opera number (Die Zauberflöte → Akt I → No. 1):
 | `movement`       | Akt I: No. 1 Introduktion „Zu Hilfe! Zu Hilfe!” (Tamino, Damen)    |
 | `movementnumber` | 1                                                                  |
 | `movementtotal`  | 31                                                                 |
+| `recordingdate`  | 1937-11-08/1938-03-08                                              |
 
 The rules:
 
@@ -135,6 +139,18 @@ The rules:
   composers Picard set for the track's other works, named the way Picard
   names the composers it sets itself (see [Composer names in other
   scripts](#composer-names-in-other-scripts)).
+- `recordingdate` runs from the earliest to the latest date MusicBrainz gives
+  the recording's performance of its works and the sessions of its players,
+  singers, conductors and recording engineer, as an ISO 8601 interval
+  ("1937-11-08/1938-03-08"), or is a single date when they're the same. The
+  dates can be partial ("2011-12", "1992"). The dates of other relationships
+  are left out, as they can be later (a mix) or about the release (the
+  phonographic copyright). Picard's `date` is the release date, and
+  `originaldate` the first release's, which for a reissue is the closer of
+  the two. When MusicBrainz has no date, the tag is deleted. Picard has no
+  standard field for it, so it's a Vorbis comment `RECORDINGDATE`, a `TXXX`
+  frame described `recordingdate`, an APE item `Recordingdate`, and a
+  `----:com.apple.iTunes:recordingdate` atom, like `work_hierarchy`.
 - `musicbrainz_workid` is left as Picard sets it: the IDs of the works the
   recording performs. Picard's original `work` and `musicbrainz_workid` values
   are kept in the `_recording_work` and `_recording_workid` script variables,

@@ -9,6 +9,7 @@ from support import WORKS, load_fixture, load_work
 from hierarchy import (
     JSON_TAG,
     MAX_DEPTH,
+    RECORDING_DATE_TAG,
     Artist,
     Performance,
     StandardTags,
@@ -17,10 +18,12 @@ from hierarchy import (
     _catalogue_numbers,
     _numeral_value,
     apply_composer_tags,
+    apply_recording_date,
     apply_tags,
     display_name,
     inherited_composers,
     performances,
+    recording_date,
     resolve,
     standard_tags,
     title_tags,
@@ -977,3 +980,47 @@ def test_titles_are_not_read_for_works_in_a_collection():
         parents=[link("c", "Waltzes", 1, ["part of collection"])],
     )
     assert title_tags(resolve(performed(waltz), {}).segments, None) is None
+
+
+def test_recording_date_from_the_performance_of_the_work():
+    # Beecham's Zauberflöte, recorded from November 1937 to March 1938
+    assert recording_date(recording("zauberfloete", 1, 4)) == "1937-11-08/1938-03-08"
+    # MusicBrainz has no dates for these
+    assert recording_date(recording("bach_keyboard_suites", 1, 4)) is None
+
+
+def dated(target, kind, begin=None, end=None):
+    return {"target-type": target, "type": kind, "begin": begin, "end": end}
+
+
+def test_recording_date_from_the_sessions_of_the_artists():
+    recording = {
+        "relations": [
+            dated("artist", "instrument", "2011-12-05", "2011-12-07"),
+            dated("artist", "conductor", "2011-12"),
+            # Not when the music was recorded
+            dated("artist", "phonographic copyright", "2013"),
+            dated("artist", "mix", "2012-03-01"),
+            dated("place", "recorded at", "2010"),
+        ]
+    }
+    # A partial date sorts before the days in it
+    assert recording_date(recording) == "2011-12/2011-12-07"
+
+
+def test_recording_date_of_a_single_day():
+    assert recording_date({"relations": [dated("work", "performance", "1999-04-07")]}) == (
+        "1999-04-07"
+    )
+    # A relationship with only an end ended then
+    assert recording_date({"relations": [dated("artist", "vocal", end="1992")]}) == "1992"
+    assert recording_date({"relations": [dated("work", "performance")]}) is None
+    assert recording_date({}) is None
+
+
+def test_recording_date_tag_is_written_or_deleted():
+    metadata = FakeMetadata()
+    apply_recording_date(metadata, {"relations": [dated("work", "performance", "1961")]})
+    assert metadata[RECORDING_DATE_TAG] == "1961"
+    apply_recording_date(metadata, {"relations": []})
+    assert RECORDING_DATE_TAG in metadata.deleted

@@ -2,7 +2,7 @@ uuid = "4ad2bc1a-9be5-4b4e-96bc-530fa9fca038"
 name = "Work Hierarchy"
 authors = ["John Hamilton"]
 description = "Tags classical works with their full work hierarchy, including tracks that contain several movements"
-version = "0.3.1"
+version = "0.4.0"
 api = ["3.0"]
 license = "GPL-2.0-or-later"
 license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
@@ -17,7 +17,9 @@ handling tracks that contain several movements.
 Writes the standard `work`, `movement`, `movementnumber`, `movementtotal` and
 `showmovement` tags, plus a `work_hierarchy` tag holding a JSON description of
 every work in the track and its path from the top-level work. Performed works
-with no composer on MusicBrainz take their parent work's composers.
+with no composer on MusicBrainz take their parent work's composers. A
+`recordingdate` tag says when the recording was made, from the dates
+MusicBrainz gives its performances.
 
 Requires "Use track relationships" in Options > Metadata. The original values
 of `work` and `musicbrainz_workid` are kept in the `_recording_work` and

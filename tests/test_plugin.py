@@ -126,6 +126,17 @@ def test_original_metadata_has_the_final_tags(picard_env):
     assert t.orig_metadata["work_hierarchy"] == t.metadata["work_hierarchy"]
 
 
+def test_tracks_get_their_recording_date(picard_env):
+    web = picard_env.web
+    album = start_album_load(load_fixture("zauberfloete"))
+    web.serve()
+    assert track(album, 1, 4).metadata["recordingdate"] == "1937-11-08/1938-03-08"
+
+    album = start_album_load(load_fixture("bach_keyboard_suites"))
+    web.serve()
+    assert "recordingdate" not in track(album, 1, 4).metadata
+
+
 def test_opera_three_levels(picard_env):
     web = picard_env.web
     album = start_album_load(load_fixture("zauberfloete"))

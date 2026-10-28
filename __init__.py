@@ -10,7 +10,14 @@ from picard.plugin3.api import PluginApi
 from picard.track import NonAlbumTrack
 from PyQt6.QtNetwork import QNetworkReply
 
-from .hierarchy import WorkInfo, apply_tags, main_names, performances, resolve
+from .hierarchy import (
+    WorkInfo,
+    apply_recording_date,
+    apply_tags,
+    main_names,
+    performances,
+    resolve,
+)
 
 try:
     from picard.mbjson import _translate_artist_node
@@ -318,6 +325,8 @@ def process_track(api, track, metadata, track_node, release_node=None):
         return
     metadata["~recording_work"] = metadata.getall("work")
     metadata["~recording_workid"] = metadata.getall("musicbrainz_workid")
+    # It needs no lookups
+    apply_recording_date(metadata, recording)
     write_tags = partial(apply_tags, recording_title=recording.get("title"))
     performed = performances(recording, picard_names)
     if isinstance(track, NonAlbumTrack):
