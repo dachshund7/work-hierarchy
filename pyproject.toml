@@ -1,6 +1,6 @@
 [project]
 name = "picard-work-hierarchy"
-version = "0.5.0"
+version = "0.6.0"
 description = "MusicBrainz Picard 3 plugin that tags classical works with their full work hierarchy, including tracks that contain several movements"
 readme = "README.md"
 authors = [{ name = "John Hamilton", email = "jlhamilton@gmail.com" }]

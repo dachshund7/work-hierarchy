@@ -81,7 +81,8 @@ def test_one_lookup_per_parent_work(picard_env):
         "eb3a7cf5-a796-4d88-acd3-beac6f43b657",
     ])
     assert all(
-        call["unencoded_queryargs"] == {"inc": "artist-rels+work-rels"} for call in web.calls
+        call["unencoded_queryargs"] == {"inc": "artist-rels+work-rels+aliases"}
+        for call in web.calls
     )
 
 
@@ -554,6 +555,31 @@ def test_standalone_recording(picard_env):
     [file_metadata] = file.copy_metadata.call_args.args
     assert file_metadata["work"] == "Die Zauberflöte, K. 620"
     assert file_metadata["movement"] == t.metadata["movement"]
+
+
+def test_a_work_performed_whole_is_looked_up_for_its_aliases(picard_env):
+    web = picard_env.web
+    song = {"id": "e0000000-0000-0000-0000-000000000328", "title": "Erlkönig, D. 328"}
+    recording = json.loads(json.dumps(load_fixture("zauberfloete")["media"][0]["tracks"][1]))
+    recording = recording["recording"]
+    recording["relations"] = [
+        {
+            "type": "performance",
+            "target-type": "work",
+            "direction": "forward",
+            "attributes": [],
+            "work": {**song, "relations": []},
+        }
+    ]
+    t, _ = load_standalone(picard_env, recording)
+
+    # Not an ancestor, but looked up for its other names
+    assert web.requested == [song["id"]]
+    _, handler = web.queue.pop(0)
+    handler({**song, "relations": [], "aliases": [{"name": "The Erl-King"}]}, MagicMock(), None)
+
+    [segment] = json.loads(t.metadata["work_hierarchy"])["segments"]
+    assert segment["path"][0]["aliases"] == ["The Erl-King"]
 
 
 def test_error_while_tagging_still_finishes_the_album(picard_env, monkeypatch):

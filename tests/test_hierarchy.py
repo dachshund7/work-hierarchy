@@ -307,6 +307,53 @@ def test_failed_ancestors_are_not_reported_again():
     assert resolution.unknown == frozenset()
 
 
+def test_works_performed_whole_are_looked_up_for_their_aliases():
+    schubert = Artist("schubert", "Franz Schubert")
+    song = work("s", "Erlkönig, D. 328", composers=[schubert])
+    resolution = resolve(performed(song), {})
+    assert (resolution.unknown, resolution.whole) == (frozenset(), {"s"})
+    assert resolve(performed(song), {}, failed=["s"]).whole == frozenset()
+
+    # Once looked up, it has its aliases, and keeps its composers as named
+    looked_up = WorkInfo.from_json({
+        "id": "s",
+        "title": "Erlkönig, D. 328",
+        "aliases": [
+            {"name": "The Erl-King"},
+            {"name": "Erlkönig, D. 328"},
+            {"name": "The Erl-King", "locale": "en"},
+            {"name": "Le Roi des aulnes"},
+        ],
+        "relations": [
+            {
+                "type": "composer",
+                "target-type": "artist",
+                "artist": {"id": "schubert", "name": "Schubert, Franz"},
+            }
+        ],
+    })
+    resolution = resolve(performed(song), {"s": looked_up})
+    assert resolution.whole == frozenset()
+    [node] = json.loads(to_json(resolution.segments))["segments"][0]["path"]
+    assert node["aliases"] == ["The Erl-King", "Le Roi des aulnes"]
+    assert node["composers"] == [{"id": "schubert", "name": "Franz Schubert"}]
+
+
+def test_movements_are_not_looked_up_for_aliases():
+    movement = work("m1", "Sonata: I. Allegro", parents=[link("sonata", "Sonata", 1)])
+    sonata = work("sonata", "Sonata", parts=[link("m1", "Sonata: I. Allegro", 1)])
+    # Not while the paths aren't complete, as the work isn't known yet
+    resolution = resolve(performed(movement), {})
+    assert (resolution.unknown, resolution.whole) == ({"sonata"}, frozenset())
+    # The work is the sonata, an ancestor, looked up already
+    assert resolve(performed(movement), {"sonata": sonata}).whole == frozenset()
+
+
+def test_works_have_no_aliases_unless_asked_for():
+    assert WorkInfo.from_json({"id": "x", "title": "X"}).aliases is None
+    assert WorkInfo.from_json({"id": "x", "title": "X", "aliases": []}).aliases == ()
+
+
 def test_work_and_its_part_both_linked():
     whole = work("w", "Suite", parts=[link("p", "Suite: I. Prelude", 1)])
     part = work("p", "Suite: I. Prelude", parents=[link("w", "Suite", 1)])
@@ -699,6 +746,8 @@ def test_json_format():
         ],
         "disambiguation": "",
         "arrangement_of": None,
+        # The fixtures are saved without aliases
+        "aliases": None,
     }
     assert (act["name"], act["position"], act["part_total"]) == ("Akt I", 2, 31)
     assert act["part_attributes"] == ["act"]

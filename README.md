@@ -17,6 +17,9 @@ Tags classical music with its work and movement structure from MusicBrainz:
 - **Arrangements.** Each work in the `work_hierarchy` tag says which work
   it's an arrangement of, if it is one, so a lute arrangement of a violin
   partita can be told from the partita, whose title it has.
+- **Other names.** Each work also gives its other names on MusicBrainz, in
+  any language, so a player can find Schubert's "Quintett A-Dur, D. 667
+  „Forellenquintett“" by "Trout".
 
 It replaces the Work & Movement plugin, which looks only one level up and uses
 only the first work linked to a recording. Disable that plugin when using this
@@ -187,7 +190,8 @@ A JSON object. Track 4 above:
             { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
           ],
           "disambiguation": "",
-          "arrangement_of": null
+          "arrangement_of": null,
+          "aliases": []
         },
         {
           "id": "87f88e03-4f1d-3230-a37f-c12d23d8b091",
@@ -204,7 +208,8 @@ A JSON object. Track 4 above:
             { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
           ],
           "disambiguation": "",
-          "arrangement_of": null
+          "arrangement_of": null,
+          "aliases": []
         }
       ],
       "work_index": 0,
@@ -229,7 +234,8 @@ A JSON object. Track 4 above:
             { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
           ],
           "disambiguation": "",
-          "arrangement_of": null
+          "arrangement_of": null,
+          "aliases": []
         }
       ],
       "work_index": 0,
@@ -295,6 +301,11 @@ A JSON object. Track 4 above:
     Some originals are linked to their catch-all the wrong way round, as
     arrangements of it, so a catch-all is never taken for the work
     arranged.
+  - `aliases`: the work's other names on MusicBrainz, in any language, once
+    each and without its `title`, such as "Piano quintet in A, 'Trout
+    Quintet'"; `null` if they weren't looked up. They're looked up for the
+    works above the performed ones and for a work performed whole, but not
+    for the movements of a work.
 
 ### Grouping
 
@@ -312,9 +323,10 @@ A JSON object. Track 4 above:
 
 When Picard loads an album, the release data already includes, for each
 recording, the works it performs and each work's immediate parent. The plugin
-looks up each parent with `/ws/2/work/<id>?inc=work-rels+artist-rels` to find
-the next level up, how many parts it has and who composed it, and repeats
-until it reaches a top-level work. The lookups are made for the whole release
+looks up each parent with `/ws/2/work/<id>?inc=work-rels+artist-rels+aliases` to
+find the next level up, how many parts it has, who composed it and its other
+names, and repeats until it reaches a top-level work. A work performed whole,
+which isn't a parent, is looked up too, for its other names. The lookups are made for the whole release
 at once (twenty tracks of three suites cost three requests), shared with
 other albums loading at the same time, and cached for 10 minutes. Picard
 waits for them before creating the album's tracks, so each track is tagged

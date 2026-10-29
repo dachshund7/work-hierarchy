@@ -155,6 +155,19 @@ class Artist:
     sort_name: str = field(default="", compare=False)
 
 
+def _alias_names(node: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The names of a work node's aliases, once each, without its title.
+
+    None if the node has no aliases at all, as a work only has them when
+    they're asked for.
+    """
+    if "aliases" not in node:
+        return None
+    title = node.get("title") or ""
+    names = (alias.get("name") or "" for alias in node.get("aliases") or ())
+    return tuple(dict.fromkeys(name for name in names if name and name != title))
+
+
 @dataclass(frozen=True)
 class WorkInfo:
     """A work, its "parts" relationships and its composers."""
@@ -169,6 +182,10 @@ class WorkInfo:
     #: The works this one is linked to as an arrangement of; see
     #: arrangement_of.
     arranges: tuple[WorkLink, ...] = ()
+    #: Its other names on MusicBrainz, in any language, as in "Trout
+    #: Quintet" for "Quintett A-Dur, D. 667 „Forellenquintett“"; None when
+    #: they weren't asked for, as in the works of a release.
+    aliases: tuple[str, ...] | None = None
 
     @classmethod
     def from_json(cls, node: Mapping[str, Any], name_artist: ArtistNamer = main_names) -> WorkInfo:
@@ -216,6 +233,7 @@ class WorkInfo:
             composers=tuple(composers),
             disambiguation=node.get("disambiguation") or "",
             arranges=tuple(arranges),
+            aliases=_alias_names(node),
         )
 
     @property
@@ -303,6 +321,8 @@ class Node:
     #: The work this one arranges (see WorkInfo.arrangement_of); also None
     #: when the work was not looked up.
     arrangement_of: WorkLink | None = None
+    #: See WorkInfo.aliases; None when they weren't asked for.
+    aliases: tuple[str, ...] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -326,6 +346,7 @@ class Node:
             "arrangement_of": None
             if self.arrangement_of is None
             else {"id": self.arrangement_of.id, "title": self.arrangement_of.title},
+            "aliases": None if self.aliases is None else list(self.aliases),
         }
 
 
@@ -364,6 +385,10 @@ class Resolution:
     segments: tuple[Segment, ...]
     #: IDs of ancestor works that must be looked up to complete the paths.
     unknown: frozenset[str]
+    #: IDs of works performed whole, the work of their segment, that weren't
+    #: looked up: the works of a release have no aliases, and the work's
+    #: names are what a search would look for.
+    whole: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -434,6 +459,8 @@ def resolve(
     the first ancestor that is missing from ``works``; that ancestor is still
     included, using what the child's relationship says about it, and its ID
     is reported in ``Resolution.unknown`` unless it is listed in ``failed``.
+    A performed work that was looked up too is taken from ``works``, for its
+    aliases; one performed whole that wasn't is in ``Resolution.whole``.
     """
     skip = frozenset(failed)
     unknown = set()
@@ -463,7 +490,16 @@ def resolve(
         group.sort(key=lambda segment: [_position_key(node) for node in segment.path[1:]])
         work_index = _work_index([segment.path for segment in group])
         ordered.extend(replace(segment, work_index=work_index) for segment in group)
-    return Resolution(tuple(ordered), frozenset(unknown))
+
+    # Only once the paths are complete, as which work is the work depends
+    # on all of them
+    whole = set()
+    if not unknown:
+        for segment in ordered:
+            work = segment.performed
+            if segment.work_index == len(segment.path) - 1 and work.id not in works:
+                whole.add(work.id)
+    return Resolution(tuple(ordered), frozenset(unknown), frozenset(whole - skip))
 
 
 def standard_tags(segments: Sequence[Segment]) -> StandardTags:
@@ -669,6 +705,11 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
     # Each level is a work (or just a link, if not looked up) together with
     # the link from it up to the next level.
     levels: list[tuple[WorkInfo | WorkLink, WorkLink | None]] = []
+    # A performed work looked up as well gives only its aliases, which the
+    # release's works lack: its composers stay named as Picard named them
+    looked_up = works.get(work.id)
+    if looked_up is not None and work.aliases is None:
+        work = replace(work, aliases=looked_up.aliases)
     current: WorkInfo | WorkLink = work
     seen = {work.id}
     missing = None
@@ -709,6 +750,7 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
             numeral=numeral,
             disambiguation=info.disambiguation if info else None,
             arrangement_of=info.arrangement_of if info else None,
+            aliases=info.aliases if info else None,
         )
         nodes.append(node)
         parent = node

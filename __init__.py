@@ -120,7 +120,9 @@ class WorkStore:
             api.mb_api.get(
                 f"/work/{work_id}",
                 partial(self._received, api, work_id),
-                unencoded_queryargs={"inc": "artist-rels+work-rels"},
+                # The aliases of the work only: those of its composers don't
+                # come with them
+                unencoded_queryargs={"inc": "artist-rels+work-rels+aliases"},
                 priority=True,
                 important=False,
             )
@@ -215,10 +217,15 @@ class AncestorLookup:
         return self.done
 
     def _advance(self):
-        """Request the next ancestors; return whether there are none to wait for."""
+        """Request the next ancestors; return whether there are none to wait for.
+
+        Then the works performed whole, which aren't ancestors, for their
+        aliases.
+        """
         cached = self.store.works()
         while True:
-            unknown = resolve(self.performed, self.works, self.failed).unknown
+            resolution = resolve(self.performed, self.works, self.failed)
+            unknown = resolution.unknown | resolution.whole
             if not unknown:
                 return True
             found = unknown & cached.keys()
