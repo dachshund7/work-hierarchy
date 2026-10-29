@@ -191,7 +191,10 @@ A JSON object. Track 4 above:
           ],
           "disambiguation": "",
           "arrangement_of": null,
-          "aliases": []
+          "aliases": [
+            "French overture in B minor, BWV 831",
+            "Overture in the French style, BWV 831"
+          ]
         },
         {
           "id": "87f88e03-4f1d-3230-a37f-c12d23d8b091",
@@ -209,7 +212,7 @@ A JSON object. Track 4 above:
           ],
           "disambiguation": "",
           "arrangement_of": null,
-          "aliases": []
+          "aliases": null
         }
       ],
       "work_index": 0,
@@ -235,7 +238,7 @@ A JSON object. Track 4 above:
           ],
           "disambiguation": "",
           "arrangement_of": null,
-          "aliases": []
+          "aliases": null
         }
       ],
       "work_index": 0,
