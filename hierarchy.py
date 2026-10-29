@@ -103,7 +103,10 @@ _NAME_SEPARATORS_RE = re.compile(r"[\s,;()\[\]\"“”„]+")
 
 @dataclass(frozen=True)
 class WorkLink:
-    """One side of a "parts" relationship: a work's parent or one of its parts."""
+    """One side of a "parts" relationship: a work's parent or one of its parts.
+
+    Also the work an arrangement arranges.
+    """
 
     id: str
     title: str
@@ -111,10 +114,28 @@ class WorkLink:
     #: The part's position in its parent (the relationship's ordering key).
     position: int | None
     attributes: tuple[str, ...]
+    #: The comment that tells works with the same title apart, as in
+    #: "for two pianos, Busoni".
+    disambiguation: str = ""
 
     @property
     def is_collection(self) -> bool:
         return COLLECTION_ATTRIBUTE in self.attributes
+
+
+#: Hyphens and dashes, U+2010 to U+2015, as well as "-", and spaces.
+_HYPHENS_RE = re.compile(r"[-\u2010-\u2015\s]+")
+
+
+def is_catch_all(disambiguation: str) -> bool:
+    """Whether a work's disambiguation marks it as the "catch-all for
+    arrangements" work that MusicBrainz keeps for the arrangements of a work
+    that have no work of their own.
+
+    Editors spell it "catch-all", "catch all" and with other hyphens.
+    """
+    text = _HYPHENS_RE.sub(" ", disambiguation.casefold())
+    return "catch all" in text and "arrangement" in text
 
 
 #: Names an artist node of the web service: its name and sort name, as the
@@ -144,12 +165,17 @@ class WorkInfo:
     parents: tuple[WorkLink, ...]
     parts: tuple[WorkLink, ...]
     composers: tuple[Artist, ...] = ()
+    disambiguation: str = ""
+    #: The works this one is linked to as an arrangement of; see
+    #: arrangement_of.
+    arranges: tuple[WorkLink, ...] = ()
 
     @classmethod
     def from_json(cls, node: Mapping[str, Any], name_artist: ArtistNamer = main_names) -> WorkInfo:
         """A work node of the web service, its composers named by ``name_artist``."""
         parents = []
         parts = []
+        arranges = []
         composers = []
         for rel in node.get("relations") or ():
             if rel.get("target-type") == "artist" and rel.get("type") == "composer":
@@ -158,7 +184,7 @@ class WorkInfo:
                 if composer.id and composer not in composers:
                     composers.append(composer)
                 continue
-            if rel.get("target-type") != "work" or rel.get("type") != "parts":
+            if rel.get("target-type") != "work" or rel.get("type") not in ("parts", "arrangement"):
                 continue
             target = rel.get("work") or {}
             if not target.get("id"):
@@ -169,8 +195,15 @@ class WorkInfo:
                 type=target.get("type"),
                 position=_int_or_none(rel.get("ordering-key")),
                 attributes=tuple(rel.get("attributes") or ()),
+                disambiguation=target.get("disambiguation") or "",
             )
-            if rel.get("direction") == "backward":
+            backward = rel.get("direction") == "backward"
+            if rel.get("type") == "arrangement":
+                # Forward, the works that arrange this one, which don't
+                # matter here
+                if backward:
+                    arranges.append(link)
+            elif backward:
                 parents.append(link)
             else:
                 parts.append(link)
@@ -181,7 +214,20 @@ class WorkInfo:
             parents=tuple(parents),
             parts=tuple(parts),
             composers=tuple(composers),
+            disambiguation=node.get("disambiguation") or "",
+            arranges=tuple(arranges),
         )
+
+    @property
+    def arrangement_of(self) -> WorkLink | None:
+        """The work this one arranges, if it's an arrangement.
+
+        An arrangement is linked backward to the work it arranges. Some
+        originals are linked backward to their own catch-all for arrangements
+        too, the wrong way round, so a catch-all is never taken for the work
+        arranged.
+        """
+        return next((link for link in self.arranges if not is_catch_all(link.disambiguation)), None)
 
     @property
     def part_total(self) -> int:
@@ -252,6 +298,11 @@ class Node:
     #: The numeral removed from the start of the name, as the title writes
     #: it ("III" for "III. Sequentia"), or None.
     numeral: str | None
+    #: None when the work was not looked up, like part_total.
+    disambiguation: str | None = None
+    #: The work this one arranges (see WorkInfo.arrangement_of); also None
+    #: when the work was not looked up.
+    arrangement_of: WorkLink | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -271,6 +322,10 @@ class Node:
             "composers": None
             if self.composers is None
             else [{"id": artist.id, "name": artist.name} for artist in self.composers],
+            "disambiguation": self.disambiguation,
+            "arrangement_of": None
+            if self.arrangement_of is None
+            else {"id": self.arrangement_of.id, "title": self.arrangement_of.title},
         }
 
 
@@ -652,6 +707,8 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
             composers=info.composers if info else None,
             number=position if position is not None else number,
             numeral=numeral,
+            disambiguation=info.disambiguation if info else None,
+            arrangement_of=info.arrangement_of if info else None,
         )
         nodes.append(node)
         parent = node

@@ -14,6 +14,9 @@ Tags classical music with its work and movement structure from MusicBrainz:
 - **Recording dates.** A `recordingdate` tag says when the recording was
   made, from the dates MusicBrainz gives its performances, so a reissue
   can be told from the recording it reissues.
+- **Arrangements.** Each work in the `work_hierarchy` tag says which work
+  it's an arrangement of, if it is one, so a lute arrangement of a violin
+  partita can be told from the partita, whose title it has.
 
 It replaces the Work & Movement plugin, which looks only one level up and uses
 only the first work linked to a recording. Disable that plugin when using this
@@ -182,7 +185,9 @@ A JSON object. Track 4 above:
           "collections": [],
           "composers": [
             { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
-          ]
+          ],
+          "disambiguation": "",
+          "arrangement_of": null
         },
         {
           "id": "87f88e03-4f1d-3230-a37f-c12d23d8b091",
@@ -197,7 +202,9 @@ A JSON object. Track 4 above:
           "collections": [],
           "composers": [
             { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
-          ]
+          ],
+          "disambiguation": "",
+          "arrangement_of": null
         }
       ],
       "work_index": 0,
@@ -220,7 +227,9 @@ A JSON object. Track 4 above:
           "collections": [],
           "composers": [
             { "id": "24f1766e-9635-4d58-a4d4-9413f9f98a4c", "name": "Johann Sebastian Bach" }
-          ]
+          ],
+          "disambiguation": "",
+          "arrangement_of": null
         }
       ],
       "work_index": 0,
@@ -274,6 +283,18 @@ A JSON object. Track 4 above:
     tags are (see above), though never as credited. A part's `composers` are
     empty when MusicBrainz links the composer only to its parent, even when
     the composer tags are inherited (see above).
+  - `disambiguation`: the comment that MusicBrainz gives the work to tell it
+    from works with the same title, such as "for two pianos, Busoni", or
+    `""` when it has none; `null` if the work's own data couldn't be looked
+    up.
+  - `arrangement_of`: for an arrangement, the work it arranges, with `id`
+    and `title`; otherwise `null`, also when the work's own data couldn't be
+    looked up. MusicBrainz keeps the arrangements that have no work of
+    their own under a "catch-all for arrangements" work, such as the one
+    for Bach's Violin Partita no. 2, which is an arrangement of the partita.
+    Some originals are linked to their catch-all the wrong way round, as
+    arrangements of it, so a catch-all is never taken for the work
+    arranged.
 
 ### Grouping
 

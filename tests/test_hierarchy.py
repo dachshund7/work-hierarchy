@@ -22,6 +22,7 @@ from hierarchy import (
     apply_tags,
     display_name,
     inherited_composers,
+    is_catch_all,
     performances,
     recording_date,
     resolve,
@@ -696,6 +697,8 @@ def test_json_format():
         "composers": [
             {"id": "b972f589-fb0e-474e-b64a-803b0364fa75", "name": "Wolfgang Amadeus Mozart"}
         ],
+        "disambiguation": "",
+        "arrangement_of": None,
     }
     assert (act["name"], act["position"], act["part_total"]) == ("Akt I", 2, 31)
     assert act["part_attributes"] == ["act"]
@@ -719,6 +722,103 @@ def test_json_number_without_position_is_read_from_the_title():
     [segment] = resolve(performed(gloria), {"m": mass}).segments
     node = segment.to_json()["path"][-1]
     assert (node["position"], node["number"], node["numeral"]) == (None, 2, "II")
+
+
+PARTITA = "20a652f5-4b08-42fe-a036-dcd933885460"
+PARTITA_TITLE = "Violin Partita no. 2 in D minor, BWV 1004"
+
+
+def arrangement_rel(work_id, title, direction, disambiguation=""):
+    return {
+        "type": "arrangement",
+        "direction": direction,
+        "target-type": "work",
+        "attributes": [],
+        "work": {"id": work_id, "title": title, "disambiguation": disambiguation},
+    }
+
+
+def test_catch_alls_for_arrangements_are_spelled_many_ways():
+    for text in (
+        "catch-all for arrangements",
+        "catch all for arrangements",
+        "catch\u2010all for arrangements",
+        "Catch-All for Arrangements",
+    ):
+        assert is_catch_all(text), text
+    for text in ("", "for two pianos, Busoni", "catch-all for recordings"):
+        assert not is_catch_all(text), text
+
+
+def test_an_arrangement_names_the_work_it_arranges():
+    # MusicBrainz's catch-all for the arrangements of a partita, which a
+    # recording of its Chaconne on the lute is linked to
+    catch_all = WorkInfo.from_json({
+        "id": "42419947-4c5a-4623-a4fd-a9cd61611884",
+        "title": PARTITA_TITLE,
+        "disambiguation": "catch-all for arrangements",
+        "relations": [
+            arrangement_rel(PARTITA, PARTITA_TITLE, "backward"),
+            {
+                "type": "parts",
+                "direction": "forward",
+                "target-type": "work",
+                "ordering-key": 5,
+                "attributes": [],
+                "work": {
+                    "id": "c9f2776f-69e4-4f55-9a19-223a0c05ba2a",
+                    "title": f"{PARTITA_TITLE}: V. Chaconne",
+                },
+            },
+        ],
+    })
+    arranged = catch_all.arrangement_of
+    assert arranged is not None
+    assert arranged.id == PARTITA
+    assert catch_all.disambiguation == "catch-all for arrangements"
+
+    chaconne = work(
+        "c9f2776f-69e4-4f55-9a19-223a0c05ba2a",
+        f"{PARTITA_TITLE}: V. Chaconne",
+        parents=[link(catch_all.id, PARTITA_TITLE, 5)],
+    )
+    segments = resolve(performed(chaconne), {catch_all.id: catch_all}).segments
+    partita, part = json.loads(to_json(segments))["segments"][0]["path"]
+    assert partita["arrangement_of"] == {"id": PARTITA, "title": PARTITA_TITLE}
+    assert partita["disambiguation"] == "catch-all for arrangements"
+    assert (part["arrangement_of"], part["disambiguation"]) == (None, "")
+
+    # An arrangement of its own, with what it is in its disambiguation
+    busoni = WorkInfo.from_json({
+        "id": "b",
+        "title": "Chaconne",
+        "disambiguation": "for piano, Busoni",
+        "relations": [arrangement_rel(PARTITA, PARTITA_TITLE, "backward")],
+    })
+    arranged = busoni.arrangement_of
+    assert arranged is not None
+    assert arranged.title == PARTITA_TITLE
+
+    # The original, which others arrange, isn't one
+    original = WorkInfo.from_json({
+        "id": PARTITA,
+        "title": PARTITA_TITLE,
+        "relations": [arrangement_rel(catch_all.id, PARTITA_TITLE, "forward")],
+    })
+    assert original.arrangement_of is None
+
+
+def test_an_original_linked_to_its_catch_all_is_not_an_arrangement():
+    # The Marsch der Priester is linked as an arrangement of its own
+    # catch-all for arrangements, the wrong way round
+    [performance] = performances(recording("zauberfloete", 2, 1))
+    march = performance.work
+    assert [is_catch_all(link.disambiguation) for link in march.arranges] == [True]
+    assert march.arrangement_of is None
+
+    segments = resolve([performance], ALL_WORKS).segments
+    path = json.loads(to_json(segments))["segments"][0]["path"]
+    assert path[-1]["arrangement_of"] is None
 
 
 def test_json_includes_collections():
