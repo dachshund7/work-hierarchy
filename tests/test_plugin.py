@@ -16,6 +16,11 @@ BWV_831 = "13c7fae5-83ee-4a34-be2f-efbf7a0e6639"
 ZAUBERFLOETE = "e208c5f5-5d37-3dfc-ac0b-999f207c9e46"
 AKT_I = "5adc213f-700a-4435-9e95-831ed720f348"
 AKT_II = "a2e62eb9-6b1d-4a98-aa60-7e09dcb2ae48"
+BV_B_27 = "049c7f6c-f16f-4f4f-ba8a-e626aebb6971"
+BV_B_27_2 = "4d11e286-273a-3a80-b8a6-386272c3bbbc"
+BV_B_27_3 = "0596a71a-8239-48c9-89ce-76f70dfaee15"
+BWV_645 = "d729ebbf-c2d5-3193-a698-96ef50541fa6"
+BWV_659_2 = "937fff7e-a992-3606-8fd6-5a402f581d9e"
 
 
 def track(album, disc, number):
@@ -580,6 +585,45 @@ def test_a_work_performed_whole_is_looked_up_for_its_aliases(picard_env):
 
     [segment] = json.loads(t.metadata["work_hierarchy"])["segments"]
     assert segment["path"][0]["aliases"] == ["The Erl-King"]
+
+
+def test_a_part_that_arranges_a_whole_work_is_looked_up_as_the_work(picard_env):
+    web = picard_env.web
+    recording = load_fixture("bach_nostalghia")["media"][0]["tracks"][1]["recording"]
+    t, _ = load_standalone(picard_env, recording)
+    assert web.requested == [BV_B_27]
+
+    web.serve()
+
+    # Then the chorale it arranges, a whole work, so the part is the work,
+    # looked up for its other names
+    assert web.requested == [BV_B_27, BWV_659_2, BV_B_27_3]
+    assert t.metadata["work"] == "Nun komm' der Heiden Heiland, BWV 659, BV B 27/3"
+    assert t.metadata["movement"] == ""
+    [segment] = json.loads(t.metadata["work_hierarchy"])["segments"]
+    assert segment["work_index"] == 1
+
+
+def test_each_track_of_an_album_is_resolved_on_its_own(picard_env):
+    web = picard_env.web
+    release = load_fixture("bach_nostalghia")
+    # Only the two parts of Busoni's set, whose works all have fixtures
+    medium = release["media"][0]
+    medium["tracks"] = medium["tracks"][1:3]
+    album = start_album_load(release)
+    web.serve()
+
+    # Together, neither part would be the work, but they're in tracks of
+    # their own
+    assert web.requested == [BV_B_27, BWV_659_2, BWV_645, BV_B_27_3, BV_B_27_2]
+    for number, work in (
+        (2, "Nun komm' der Heiden Heiland, BWV 659, BV B 27/3"),
+        (3, "Wachet auf, ruft uns die Stimme, BWV 645, BV B 27/2"),
+    ):
+        t = track(album, 1, number)
+        assert (t.metadata["work"], t.metadata["movement"]) == (work, "")
+        [segment] = json.loads(t.metadata["work_hierarchy"])["segments"]
+        assert segment["work_index"] == 1
 
 
 def test_error_while_tagging_still_finishes_the_album(picard_env, monkeypatch):

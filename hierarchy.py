@@ -405,6 +405,11 @@ class Resolution:
     #: looked up: the works of a release have no aliases, and the work's
     #: names are what a search would look for.
     whole: frozenset[str] = frozenset()
+    #: IDs of the works that performed parts arrange, that weren't looked
+    #: up: a part with a catalogue number of its own is the work if it
+    #: arranges a whole work, which only that work's lookup tells (see
+    #: _work_index).
+    arranged: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -475,8 +480,11 @@ def resolve(
     the first ancestor that is missing from ``works``; that ancestor is still
     included, using what the child's relationship says about it, and its ID
     is reported in ``Resolution.unknown`` unless it is listed in ``failed``.
-    A performed work that was looked up too is taken from ``works``, for its
-    aliases; one performed whole that wasn't is in ``Resolution.whole``.
+    Once the paths are complete, a work that a performed part arranges, and
+    that wasn't looked up, is in ``Resolution.arranged``. A performed work
+    that was looked up too is taken from ``works``, for its aliases; once
+    the works arranged are known, one performed whole that wasn't is in
+    ``Resolution.whole``.
     """
     skip = frozenset(failed)
     unknown = set()
@@ -502,20 +510,28 @@ def resolve(
     for segment in segments:
         by_root.setdefault(segment.path[0].id, []).append(segment)
     ordered: list[Segment] = []
+    arranged = set()
     for group in by_root.values():
         group.sort(key=lambda segment: [_position_key(node) for node in segment.path[1:]])
-        work_index = _work_index([segment.path for segment in group])
+        work_index, original = _work_index([segment.path for segment in group], works)
+        if original is not None:
+            arranged.add(original)
         ordered.extend(replace(segment, work_index=work_index) for segment in group)
 
     # Only once the paths are complete, as which work is the work depends
-    # on all of them
+    # on all of them, and a part's number on all the works above it. The
+    # works performed whole only once the works arranged are known too, as
+    # a part is the work if it arranges a whole one.
+    arranged = set() if unknown else arranged - skip
     whole = set()
-    if not unknown:
+    if not unknown and not arranged:
         for segment in ordered:
             work = segment.performed
             if segment.work_index == len(segment.path) - 1 and work.id not in works:
                 whole.add(work.id)
-    return Resolution(tuple(ordered), frozenset(unknown), frozenset(whole - skip))
+    return Resolution(
+        tuple(ordered), frozenset(unknown), frozenset(whole - skip), frozenset(arranged)
+    )
 
 
 def standard_tags(segments: Sequence[Segment]) -> StandardTags:
@@ -857,7 +873,9 @@ def _excerpt(title: str, parent: Node, performed: Node) -> str | None:
     return None if name == performed.name else name
 
 
-def _work_index(paths: Sequence[tuple[Node, ...]]) -> int:
+def _work_index(
+    paths: Sequence[tuple[Node, ...]], works: Mapping[str, WorkInfo]
+) -> tuple[int, str | None]:
     """Which level of the paths, all from one top-level work, is the work.
 
     The top-level work, unless a part of it has a catalogue number of its
@@ -867,19 +885,33 @@ def _work_index(paths: Sequence[tuple[Node, ...]]) -> int:
     goes through it. The names of movements often repeat their work's
     number, or give it another one ("K359: Variation I" in "12 Variations, K.
     374a/359"), so the performed work only counts if it has parts, like a
-    whole Prelude and Fugue in one track.
+    whole Prelude and Fugue in one track, or if it arranges a whole work,
+    one that's no part of another: each of Busoni's "10 Choral Preludes, BV
+    B 27" has the BWV number of the chorale it arranges.
+
+    Also returns the ID of the work the performed work arranges, if that
+    has to be looked up to tell; until it is, the performed work doesn't
+    count. ``works`` holds the works looked up.
     """
     first = paths[0]
+    original = None
     for index in range(len(first) - 1, 0, -1):
         node = first[index]
-        if _has_own_catalogue_number(node, first[:index]) and all(
-            index < len(path)
-            and path[index].id == node.id
-            and (index < len(path) - 1 or bool(path[index].part_total))
-            for path in paths
+        if not _has_own_catalogue_number(node, first[:index]) or not all(
+            index < len(path) and path[index].id == node.id for path in paths
         ):
-            return index
-    return 0
+            continue
+        if not any(index == len(path) - 1 for path in paths) or node.part_total:
+            return index, original
+        arranges = node.arrangement_of
+        if arranges is None:
+            continue
+        if arranges.id not in works:
+            original = arranges.id
+        # Collections aren't parents, so a chorale in one is a whole work
+        elif works[arranges.id].parent() is None:
+            return index, original
+    return 0, original
 
 
 def _has_own_catalogue_number(node: Node, above: Sequence[Node]) -> bool:

@@ -713,6 +713,85 @@ def test_catalogue_numbers(name, numbers):
     assert _catalogue_numbers(name) == numbers
 
 
+# A part with a number of its own that arranges a whole work is the work
+
+BV_B_27 = "049c7f6c-f16f-4f4f-ba8a-e626aebb6971"
+BV_B_27_2 = "4d11e286-273a-3a80-b8a6-386272c3bbbc"
+BV_B_27_3 = "0596a71a-8239-48c9-89ce-76f70dfaee15"
+BWV_645 = "d729ebbf-c2d5-3193-a698-96ef50541fa6"
+BWV_659_2 = "937fff7e-a992-3606-8fd6-5a402f581d9e"
+SET_ONLY = {BV_B_27: ALL_WORKS[BV_B_27]}
+
+
+def busoni_chorale(number):
+    """Track 2 or 3 of Bach Nostalghia: part 3 or 2 of Busoni's BV B 27."""
+    return performances(recording("bach_nostalghia", 1, number))
+
+
+def test_a_part_that_arranges_a_whole_work_is_the_work():
+    # A movement until the work it arranges is looked up
+    resolution = resolve(busoni_chorale(2), SET_ONLY)
+    assert (resolution.arranged, resolution.whole) == ({BWV_659_2}, frozenset())
+    assert [s.work_index for s in resolution.segments] == [0]
+
+    resolution = resolve(busoni_chorale(2), {**SET_ONLY, BWV_659_2: ALL_WORKS[BWV_659_2]})
+    assert (resolution.arranged, resolution.whole) == (frozenset(), {BV_B_27_3})
+    assert [s.work_index for s in resolution.segments] == [1]
+    assert standard_tags(resolution.segments) == StandardTags(
+        ("Nun komm' der Heiden Heiland, BWV 659, BV B 27/3",), None, None, None
+    )
+    part = json.loads(to_json(resolution.segments))["segments"][0]["path"][1]
+    assert part["arrangement_of"]["id"] == BWV_659_2
+
+    # A work in a collection is a whole work: one of the Schübler Chorales
+    assert ALL_WORKS[BWV_645].collections
+    resolution = resolve(busoni_chorale(3), {**SET_ONLY, BWV_645: ALL_WORKS[BWV_645]})
+    assert [s.work_index for s in resolution.segments] == [1]
+
+
+def test_a_part_that_arranges_a_movement_stays_a_movement():
+    transcription, works = chain(
+        ("t", "Transcriptions from Bach", None),
+        ("t1", "Prelude and Fugue in C major, BWV 846", 1),
+    )
+    transcription = dataclasses.replace(transcription, arranges=(link(BWV_846.id, BWV_846.title),))
+    assert resolve(performed(transcription), works).arranged == {BWV_846.id}
+    # The Prelude and Fugue is a part of The Well-Tempered Clavier
+    resolution = resolve(performed(transcription), {**works, **WTC_WORKS})
+    assert resolution.arranged == frozenset()
+    assert standard_tags(resolution.segments).work == ("Transcriptions from Bach",)
+
+
+def test_a_part_whose_original_failed_stays_a_movement():
+    song = work("s", "Erlkönig, D. 328")
+    track = [*busoni_chorale(2), *performed(song)]
+    # The works performed whole wait for the works arranged
+    assert resolve(track, SET_ONLY).whole == frozenset()
+
+    resolution = resolve(track, SET_ONLY, failed=[BWV_659_2])
+    assert [s.work_index for s in resolution.segments] == [0, 0]
+    assert (resolution.arranged, resolution.whole) == (frozenset(), {"s"})
+
+
+def test_two_arranged_parts_in_one_track_stay_in_their_set():
+    resolution = resolve([*busoni_chorale(2), *busoni_chorale(3)], SET_ONLY)
+    # Neither is the work, whatever it arranges, so nothing is looked up
+    assert resolution.arranged == frozenset()
+    assert [s.work_index for s in resolution.segments] == [0, 0]
+    tags = standard_tags(resolution.segments)
+    assert tags.work == ("10 Choral Preludes, BV B 27",)
+    assert tags.movement == (
+        "Wachet auf, ruft uns die Stimme, BWV 645, BV B 27/2"
+        " / Nun komm' der Heiden Heiland, BWV 659, BV B 27/3"
+    )
+
+
+def test_originals_wait_for_the_paths():
+    # A part's number only counts if no work above it has it
+    resolution = resolve(busoni_chorale(2), {})
+    assert (resolution.unknown, resolution.arranged) == ({BV_B_27}, frozenset())
+
+
 # Parts of works named in recordings' titles
 
 FIREWORKS = work("hwv351", "Music for the Royal Fireworks, HWV 351")

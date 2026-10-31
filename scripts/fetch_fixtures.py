@@ -32,16 +32,25 @@ RELEASES = {
     "bach_keyboard_suites": "9706c884-fede-44d6-879d-cf19cd75a92e",
     # Mozart, Die Zauberflöte (1989): opera -> act -> number.
     "zauberfloete": "571f466c-c2fc-4f82-bacc-16e68389e608",
+    # Bach Nostalghia (2021): two of Busoni's 10 Choral Preludes, BV B 27,
+    # each an arrangement of a whole chorale.
+    "bach_nostalghia": "fcf1a95f-fe1a-4c6b-a228-a2d4d7f1c075",
 }
 
 # Works fetched on their own, as a release would give them: "50/50" (2011),
 # a soundtrack that lists the songs the film uses, and three of those songs,
-# credited to composers, to writers and to no one.
+# credited to composers, to writers and to no one. Then the two chorales of
+# Bach Nostalghia, which are looked up once they're works, and the works they
+# arrange, one of them in a collection.
 WORKS = [
     "0833c785-e98e-4df4-896a-4c3a5532042c",  # 50/50
     "192334a0-9459-47b0-8108-04ebfa8379e3",  # Yellow Ledbetter
     "cd9694f3-ade2-3ad6-a6e3-34edeb338928",  # High and Dry
     "c990f0f6-6dc4-4172-bfaa-cbdfe4cdbce7",  # Bricks or Coconuts
+    "0596a71a-8239-48c9-89ce-76f70dfaee15",  # Nun komm' der Heiden Heiland, BV B 27/3
+    "4d11e286-273a-3a80-b8a6-386272c3bbbc",  # Wachet auf, ruft uns die Stimme, BV B 27/2
+    "937fff7e-a992-3606-8fd6-5a402f581d9e",  # Nun komm, der Heiden Heiland, BWV 659.2
+    "d729ebbf-c2d5-3193-a698-96ef50541fa6",  # Schübler-Choräle: Wachet auf, BWV 645
 ]
 
 # The inc parameters Picard 3.0 uses for a release lookup with track

@@ -103,7 +103,10 @@ The rules:
   4). Acts and books have no catalogue numbers, so an opera stays the work.
   A track of a whole such part, a Prelude and Fugue in one track, has no
   movement tags. Movements often repeat their work's number, or give it
-  another one, so the performed work only counts when it has parts.
+  another one, so the performed work only counts when it has parts, or when
+  it arranges a whole work, one that's no part of another (a collection
+  doesn't count): each of Busoni's *10 Choral Preludes, BV B 27* is a work,
+  as it has the BWV number of the chorale it arranges.
 - `movement` names every level below the work, joined with ": ", with their
   numbers ("I. oddíl: III. Sequentia: Quid sum miser"), except the performed
   work's, which is `movementnumber`. Players that want a different level can
@@ -341,7 +344,9 @@ find the next level up, how many parts it has, who composed it and its other
 names, and repeats until it reaches a top-level work, or a soundtrack that
 lists the work as one of the songs the film uses (see the rules above). A
 work performed whole,
-which isn't a parent, is looked up too, for its other names. The lookups are made for the whole release
+which isn't a parent, is looked up too, for its other names, and so is the
+work that a part with a catalogue number of its own arranges, to see that
+it's a whole work. The lookups are made for the whole release
 at once (twenty tracks of three suites cost three requests), shared with
 other albums loading at the same time, and cached for 10 minutes. Picard
 waits for them before creating the album's tracks, so each track is tagged

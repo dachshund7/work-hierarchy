@@ -185,15 +185,19 @@ class AncestorLookup:
 
     A work only names its parent, so the climb goes a level at a time, and
     through the store's cache as far as it can before requesting anything.
-    If it had to wait for lookups, ``finished()`` is called once the paths
-    are as complete as they can be, unless ``abandoned()`` is true by then,
-    or the user stopped network requests.
+    Then the works that performed parts arrange, and then the works
+    performed whole (see _advance). If it had to wait for lookups,
+    ``finished()`` is called once the paths are as complete as they can be,
+    unless ``abandoned()`` is true by then, or the user stopped network
+    requests.
     """
 
-    def __init__(self, api, store, performed, finished, abandoned):
+    def __init__(self, api, store, recordings, finished, abandoned):
         self.api = api
         self.store = store
-        self.performed = performed
+        #: The performances of each recording. Each is resolved on its own,
+        #: as which work is the work depends on the others in its track.
+        self.recordings = recordings
         self.finished = finished
         self.abandoned = abandoned
         #: The ancestors received, or found in the cache. Kept here as well,
@@ -219,13 +223,16 @@ class AncestorLookup:
     def _advance(self):
         """Request the next ancestors; return whether there are none to wait for.
 
-        Then the works performed whole, which aren't ancestors, for their
-        aliases.
+        Then the works that performed parts arrange, to tell whether those
+        parts are works, and then the works performed whole, which aren't
+        ancestors, for their aliases.
         """
         cached = self.store.works()
         while True:
-            resolution = resolve(self.performed, self.works, self.failed)
-            unknown = resolution.unknown | resolution.whole
+            resolutions = [
+                resolve(performed, self.works, self.failed) for performed in self.recordings
+            ]
+            unknown = frozenset().union(*(r.unknown | r.arranged | r.whole for r in resolutions))
             if not unknown:
                 return True
             found = unknown & cached.keys()
@@ -275,11 +282,7 @@ def process_album(api, album, metadata, release_node):
     the album has no critical tasks left, so each track is tagged once, with
     every level known, before later processors and the tagger scripts run.
     """
-    performed = [
-        performance
-        for recording in _recordings(release_node)
-        for performance in performances(recording, picard_names)
-    ]
+    recordings = [performances(recording, picard_names) for recording in _recordings(release_node)]
     task_id = f"{api.plugin_id}_works_{uuid.uuid4().hex}"
     album_ref = weakref.ref(album)
 
@@ -297,7 +300,7 @@ def process_album(api, album, metadata, release_node):
             # requests ends, so a plugin's task has to do it.
             current._finalize_loading(None)
 
-    lookup = AncestorLookup(api, _store, performed, finished, abandoned)
+    lookup = AncestorLookup(api, _store, recordings, finished, abandoned)
     _album_works[album] = lookup.works
     if not lookup.start():
         # Added directly rather than with api.add_album_task(), which gives
@@ -365,7 +368,7 @@ def _tag_standalone(api, track, metadata, performed, write_tags):
         if segments != tagged:
             _update_standalone_track(track, write_tags, segments)
 
-    lookup = AncestorLookup(api, _store, performed, finished, abandoned)
+    lookup = AncestorLookup(api, _store, [performed], finished, abandoned)
     lookup.start()
     tagged = resolve(performed, lookup.works).segments
     write_tags(metadata, tagged)
