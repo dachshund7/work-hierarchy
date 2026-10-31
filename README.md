@@ -127,6 +127,16 @@ The rules:
   positioned up to 31.
 - "Part of collection" relationships (e.g. *6 Partitas, BWV 825-830*) are not
   followed. The partita stays the work; the collection is recorded in the JSON.
+- MusicBrainz lists the songs a film uses as the parts of its soundtrack, as
+  *50/50* lists Pearl Jam's "Yellow Ledbetter" and Radiohead's "High and
+  Dry". A part of a soundtrack that credits its music to someone (a composer,
+  or a writer, as many songs have instead), but to none of the people the
+  soundtrack credits, is someone else's song: it's a work of its own, gets no
+  movement tags, and the soundtrack isn't in the JSON. The cues of a score,
+  by its composer, stay its movements. So does a part that credits no one,
+  as nothing tells it from a cue; crediting it on MusicBrainz fixes that. A
+  cue credited only to a composer the soundtrack doesn't credit, such as one
+  who wrote additional music, is taken for a song.
 - A recording of a work without parts (a song, say) gets `work` and no
   movement tags.
 - Many movements on MusicBrainz aren't linked to their work, but are titled
@@ -328,7 +338,9 @@ When Picard loads an album, the release data already includes, for each
 recording, the works it performs and each work's immediate parent. The plugin
 looks up each parent with `/ws/2/work/<id>?inc=work-rels+artist-rels+aliases` to
 find the next level up, how many parts it has, who composed it and its other
-names, and repeats until it reaches a top-level work. A work performed whole,
+names, and repeats until it reaches a top-level work, or a soundtrack that
+lists the work as one of the songs the film uses (see the rules above). A
+work performed whole,
 which isn't a parent, is looked up too, for its other names. The lookups are made for the whole release
 at once (twenty tracks of three suites cost three requests), shared with
 other albums loading at the same time, and cached for 10 minutes. Picard

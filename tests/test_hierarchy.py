@@ -9,6 +9,7 @@ from support import WORKS, load_fixture, load_work
 from hierarchy import (
     JSON_TAG,
     MAX_DEPTH,
+    MOVEMENT_TAGS,
     RECORDING_DATE_TAG,
     Artist,
     Performance,
@@ -39,8 +40,10 @@ def recording(release: str, disc: int, number: int) -> dict:
     return medium["tracks"][number - 1]["recording"]
 
 
-def work(work_id, title, parents=(), parts=(), type=None, composers=()):
-    return WorkInfo(work_id, title, type, tuple(parents), tuple(parts), tuple(composers))
+def work(work_id, title, parents=(), parts=(), type=None, composers=(), writers=()):
+    return WorkInfo(
+        work_id, title, type, tuple(parents), tuple(parts), tuple(composers), writers=tuple(writers)
+    )
 
 
 def link(work_id, title, position=None, attributes=()):
@@ -382,6 +385,103 @@ def test_cycles_stop_the_climb():
     resolution = resolve(performed(a), {"a": a, "b": b})
     assert [node.id for node in resolution.segments[0].path] == ["b", "a"]
     assert resolution.unknown == frozenset()
+
+
+# "50/50" (2011), a soundtrack that lists the songs the film uses, and three
+# of them
+FIFTY_FIFTY = "0833c785-e98e-4df4-896a-4c3a5532042c"
+YELLOW_LEDBETTER = "192334a0-9459-47b0-8108-04ebfa8379e3"  # credited to composers
+HIGH_AND_DRY = "cd9694f3-ade2-3ad6-a6e3-34edeb338928"  # credited to writers
+BRICKS_OR_COCONUTS = "c990f0f6-6dc4-4172-bfaa-cbdfe4cdbce7"  # credited to no one
+
+
+def path_ids(segments):
+    return [node.id for node in segments[0].path]
+
+
+def test_songs_a_soundtrack_uses_are_works_of_their_own():
+    assert ALL_WORKS[HIGH_AND_DRY].composers == ()
+    assert len(ALL_WORKS[HIGH_AND_DRY].writers) == 5
+    for song in (YELLOW_LEDBETTER, HIGH_AND_DRY):
+        songs = performed(ALL_WORKS[song])
+        # Followed as any parent is until it's looked up
+        resolution = resolve(songs, {})
+        assert resolution.unknown == {FIFTY_FIFTY}
+        assert path_ids(resolution.segments) == [FIFTY_FIFTY, song]
+
+        resolution = resolve(songs, {FIFTY_FIFTY: ALL_WORKS[FIFTY_FIFTY]})
+        assert resolution.unknown == frozenset()
+        assert path_ids(resolution.segments) == [song]
+        # Then looked up for its aliases, as any work performed whole
+        assert resolution.whole == {song}
+
+    segments = resolve(
+        performed(ALL_WORKS[YELLOW_LEDBETTER]), {FIFTY_FIFTY: ALL_WORKS[FIFTY_FIFTY]}
+    ).segments
+    assert standard_tags(segments) == StandardTags(("Yellow Ledbetter",), None, None, None)
+
+
+def test_songs_a_soundtrack_uses_lose_their_movement_tags():
+    metadata = FakeMetadata()
+    metadata["work"] = ["50/50"]
+    for name in MOVEMENT_TAGS:
+        metadata[name] = ["1"]
+    segments = resolve(
+        performed(ALL_WORKS[YELLOW_LEDBETTER]), {FIFTY_FIFTY: ALL_WORKS[FIFTY_FIFTY]}
+    ).segments
+
+    apply_tags(metadata, segments, "Yellow Ledbetter")
+
+    assert metadata["work"] == ["Yellow Ledbetter"]
+    assert metadata.deleted >= set(MOVEMENT_TAGS)
+
+
+def test_songs_a_soundtrack_lists_without_credits_stay_its_parts():
+    # Nothing tells them from the cues of a score
+    songs = performed(ALL_WORKS[BRICKS_OR_COCONUTS])
+    resolution = resolve(songs, {FIFTY_FIFTY: ALL_WORKS[FIFTY_FIFTY]})
+    assert path_ids(resolution.segments) == [FIFTY_FIFTY, BRICKS_OR_COCONUTS]
+
+
+def test_a_soundtrack_that_failed_to_load_stays_the_parent():
+    resolution = resolve(performed(ALL_WORKS[YELLOW_LEDBETTER]), {}, failed=[FIFTY_FIFTY])
+    assert resolution.unknown == frozenset()
+    assert path_ids(resolution.segments) == [FIFTY_FIFTY, YELLOW_LEDBETTER]
+
+
+def test_cues_of_a_score_stay_its_parts():
+    composer = Artist("c", "Composer")
+    songwriter = Artist("s", "Songwriter")
+    score = work("score", "Score", type="Soundtrack", composers=[composer])
+    up = [link("score", "Score")]
+    works = {"score": score}
+
+    def path(part):
+        return path_ids(resolve(performed(part), works).segments)
+
+    assert path(work("cue", "Score: Main Title", parents=up, composers=[composer])) == [
+        "score",
+        "cue",
+    ]
+    assert path(work("cue", "Score: Main Title", parents=up, writers=["c"])) == ["score", "cue"]
+    uncredited = work("cue", "Score: End Credits", parents=up)
+    assert path(uncredited) == ["score", "cue"]
+    assert inherited_composers(resolve(performed(uncredited), works).segments) == (composer,)
+    # A song by someone else that the film uses
+    assert path(work("song", "Song", parents=up, composers=[songwriter])) == ["song"]
+
+
+def test_parts_by_other_composers_are_climbed_when_not_in_a_soundtrack():
+    # The movements of the B-la-F Quartet are each by one of its composers,
+    # and the quartet is credited to none
+    quartet = work("q", "B-la-F Quartet", type="Quartet")
+    movement = work(
+        "m",
+        "B-la-F Quartet: I. Allegro",
+        parents=[link("q", "B-la-F Quartet", 1)],
+        composers=[Artist("r", "Nikolai Rimsky-Korsakov")],
+    )
+    assert path_ids(resolve(performed(movement), {"q": quartet}).segments) == ["q", "m"]
 
 
 def test_depth_is_limited():

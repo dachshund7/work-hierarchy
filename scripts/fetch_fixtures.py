@@ -34,6 +34,16 @@ RELEASES = {
     "zauberfloete": "571f466c-c2fc-4f82-bacc-16e68389e608",
 }
 
+# Works fetched on their own, as a release would give them: "50/50" (2011),
+# a soundtrack that lists the songs the film uses, and three of those songs,
+# credited to composers, to writers and to no one.
+WORKS = [
+    "0833c785-e98e-4df4-896a-4c3a5532042c",  # 50/50
+    "192334a0-9459-47b0-8108-04ebfa8379e3",  # Yellow Ledbetter
+    "cd9694f3-ade2-3ad6-a6e3-34edeb338928",  # High and Dry
+    "c990f0f6-6dc4-4172-bfaa-cbdfe4cdbce7",  # Bricks or Coconuts
+]
+
 # The inc parameters Picard 3.0 uses for a release lookup with track
 # relationships enabled (see Album.load in picard/album.py).
 RELEASE_INC = [
@@ -75,7 +85,7 @@ OPTIONAL_KEYS = {
 
 
 def trim(node):
-    """Drop optional keys and every relationship but to works and composers."""
+    """Drop optional keys and every relationship but to works, composers and writers."""
     if isinstance(node, list):
         return [trim(item) for item in node]
     if not isinstance(node, dict):
@@ -85,7 +95,7 @@ def trim(node):
         trimmed["relations"] = [
             rel
             for rel in trimmed["relations"]
-            if rel.get("target-type") == "work" or rel.get("type") == "composer"
+            if rel.get("target-type") == "work" or rel.get("type") in ("composer", "writer")
         ]
     return trimmed
 
@@ -121,6 +131,11 @@ def main() -> None:
             parent = WorkInfo.from_json(work).parent()
             if parent and parent.id not in done:
                 pending.add(parent.id)
+
+    for work_id in WORKS:
+        work = trim(get(f"work/{work_id}", ["work-rels", "artist-rels"]))
+        save(works_dir / f"{work_id}.json", work)
+        print(f"work {work['title']}")
 
 
 if __name__ == "__main__":

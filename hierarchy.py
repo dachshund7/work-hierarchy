@@ -65,6 +65,10 @@ _SESSION_ARTIST_TYPES = frozenset({
 #: works (e.g. "6 Partitas, BWV 825-830") rather than a work and its parts.
 COLLECTION_ATTRIBUTE = "part of collection"
 
+#: Type of the work that is a film's music, which MusicBrainz also gives
+#: the lists of the songs a film uses (see _uses_others_song).
+SOUNDTRACK_TYPE = "Soundtrack"
+
 #: Attribute of the "performance" relationship of a recording that contains
 #: only part of the work, such as one of the tracks a movement is split into.
 PARTIAL_ATTRIBUTE = "partial"
@@ -186,6 +190,11 @@ class WorkInfo:
     #: Quintet" for "Quintett A-Dur, D. 667 „Forellenquintett“"; None when
     #: they weren't asked for, as in the works of a release.
     aliases: tuple[str, ...] | None = None
+    #: The IDs of the artists credited as its writers, MusicBrainz's credit
+    #: for words and music together, which many songs have instead of
+    #: composers. Only used to tell a soundtrack's songs from its cues (see
+    #: _uses_others_song).
+    writers: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, node: Mapping[str, Any], name_artist: ArtistNamer = main_names) -> WorkInfo:
@@ -194,12 +203,18 @@ class WorkInfo:
         parts = []
         arranges = []
         composers = []
+        writers = []
         for rel in node.get("relations") or ():
             if rel.get("target-type") == "artist" and rel.get("type") == "composer":
                 artist = rel.get("artist") or {}
                 composer = Artist(artist.get("id") or "", *name_artist(artist))
                 if composer.id and composer not in composers:
                     composers.append(composer)
+                continue
+            if rel.get("target-type") == "artist" and rel.get("type") == "writer":
+                writer_id = (rel.get("artist") or {}).get("id")
+                if writer_id and writer_id not in writers:
+                    writers.append(writer_id)
                 continue
             if rel.get("target-type") != "work" or rel.get("type") not in ("parts", "arrangement"):
                 continue
@@ -234,6 +249,7 @@ class WorkInfo:
             disambiguation=node.get("disambiguation") or "",
             arranges=tuple(arranges),
             aliases=_alias_names(node),
+            writers=tuple(writers),
         )
 
     @property
@@ -700,7 +716,9 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
     """The path from ``work``'s top-level work down to ``work``.
 
     Returns the path and the ID of the ancestor that stopped the climb because
-    it has not been looked up, if any.
+    it has not been looked up, if any. A song that a soundtrack uses is a
+    work of its own, so the path stops below the soundtrack (see
+    _uses_others_song).
     """
     # Each level is a work (or just a link, if not looked up) together with
     # the link from it up to the next level.
@@ -722,9 +740,13 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
         if link is None or link.id in seen or len(levels) + 1 >= MAX_DEPTH:
             levels.append((current, None))
             break
+        above = works.get(link.id) or link
+        if _uses_others_song(above, current):
+            levels.append((current, None))
+            break
         levels.append((current, link))
         seen.add(link.id)
-        current = works.get(link.id) or link
+        current = above
 
     levels.reverse()
     nodes = []
@@ -755,6 +777,28 @@ def _climb(work: WorkInfo, works: Mapping[str, WorkInfo]) -> tuple[tuple[Node, .
         nodes.append(node)
         parent = node
     return tuple(nodes), missing
+
+
+def _uses_others_song(parent: WorkInfo | WorkLink, part: WorkInfo) -> bool:
+    """Whether ``part`` is a song that the soundtrack ``parent`` uses, not one of its cues.
+
+    MusicBrainz lists the songs a film uses as the parts of its soundtrack:
+    "50/50" (2011) lists Pearl Jam's "Yellow Ledbetter" and Radiohead's
+    "High and Dry". A part credits its music to composers, or to writers,
+    as many songs do; a part that credits someone, but none of the people
+    the soundtrack credits, is someone else's song, and a work of its own.
+    A cue by the score's composer stays a part. So does a part that credits
+    no one, which can't be told from a cue: two of the songs of "50/50" do
+    that. A cue credited only to a composer the soundtrack doesn't credit,
+    such as one who wrote additional music, is taken for a song. The
+    soundtrack's composers are only known once it's looked up, so until
+    then it's followed as any parent is.
+    """
+    if not isinstance(parent, WorkInfo) or parent.type != SOUNDTRACK_TYPE:
+        return False
+    credited = {artist.id for artist in part.composers} | set(part.writers)
+    theirs = {artist.id for artist in parent.composers} | set(parent.writers)
+    return bool(credited) and credited.isdisjoint(theirs)
 
 
 def _movement_text(movements: Sequence[tuple[tuple[Node, ...], str]]) -> str:
