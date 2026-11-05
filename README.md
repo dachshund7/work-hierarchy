@@ -39,7 +39,8 @@ MusicBrainz names some composers in the script of their language, such as
 to `composer` unless it translates them. To have them in Latin letters, turn
 on both of these in **Options → Metadata**:
 
-- **"Translate artist names"**, with a language such as English.
+- **"Artist names"**, under "Translate names when available:", with a language
+  such as English in "Preferred locales:".
 - **"Use artist sort name for translation"**. MusicBrainz sends no aliases of
   the composers linked to works, which Picard would translate from, so
   without this option their names stay as they are. With it, a name in
